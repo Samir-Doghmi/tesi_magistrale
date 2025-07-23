@@ -1,0 +1,2536 @@
+---
+title: "Untitled"
+output: html_document
+date: "2024-12-28"
+---
+
+```{r}
+install.packages("exactextractr")
+```
+
+```{r}
+library(dplyr)
+library(lubridate)
+library(xts)
+library(dplyr)
+library(readr)
+library(exactextractr)
+library(ggplot2)
+library(lubridate)
+library(tidyr)
+library(caret)
+```
+```{r}
+install.packages('terra', repos='https://rspatial.r-universe.dev')
+```
+
+
+
+```{r}
+land_cover <- read_delim("C:/Users/samir/Downloads/dati_tesi/land_cover_milano.csv", 
+                         show_col_types = FALSE, delim = ",") %>%
+  dplyr::select("OBJECTID", "Code_18", "Area_Ha", "Shape_Length", "Shape_Area") %>%
+  left_join(
+    read_delim("C:/Users/samir/Downloads/dati_tesi/land_cover_legenda.csv", 
+               show_col_types = FALSE, delim = ";"),
+    by = "Code_18"
+  )
+```
+
+
+
+
+Shape_Area: L'area in metri quadrati, derivata direttamente dalla geometria dei poligoni, calcolata in una proiezione planimetrica (EPSG:3035).
+Area_Ha: Viene comunemente inclusa per rappresentare la stessa area, ma espressa in ettari 
+```{r}
+land_cover %>% group_by(label) %>%
+  summarise(count= n()) %>% arrange(desc(count))
+```
+
+```{r}
+install.packages("raster")
+#install.packages("terra")
+```
+
+
+
+```{r}
+library(terra)
+library(raster)
+```
+
+```{r}
+raster_data <- rast("C:/Users/samir/Downloads/land_cover_rastar_europa/Results/u2018_clc2018_v2020_20u1_raster100m/u2018_clc2018_v2020_20u1_raster100m/DATA/U2018_CLC2018_V2020_20u1.tif")
+#EPSG:3035 è un sistema in metri
+```
+
+```{r}
+plot(raster_data, main = "Mappa del Land Cover (100m)", col = terrain.colors(10))
+```
+
+
+
+```{r}
+library(sf)
+```
+
+
+```{r}
+milano <-readRDS(
+  "C:/Users/samir/Downloads/dati_tesi/LAU.rds")%>% dplyr::filter( .data$NUTS3_ID == "ITC4C" & .data$LAU_NAME %in% "Milano") %>% rename(geometry = Lau_geometry )  %>% st_transform(milano, crs = 3035)
+```
+
+
+
+
+
+
+```{r}
+# Trasformiamo Milano in EPSG:3035
+milano <- st_transform(milano, crs = 3035)  #
+milano_buffer <- st_buffer(milano, dist = 300)
+
+```
+
+```{r}
+ggplot() +
+  geom_sf(data = milano, fill = "gray", color = "black", alpha = 0.5) +
+  geom_sf(data = milano_buffer, fill = "lightblue", color = "blue", alpha = 0.3) +
+  labs(title = "Buffer lungo il perimetro di Milano (4km)") +
+  theme_minimal()
+```
+
+il pacchetto raster richiede la conversione da sf a Spatial* per alcune operazioni, come crop() e mask(). Mentre La funzione crop() taglia il raster al bounding box dell'area fornita (in questo caso il buffer di Milano). Il bounding box è un rettangolo che circonda completamente il buffer.mask() usa una geometria vettoriale per filtrare i pixel del raster, mantenendo solo quelli che ricadono dentro la geometria del buffer.
+
+```{r}
+install.packages("terra", dependencies = TRUE)
+```
+
+
+```{r}
+library(exactextractr)
+```
+
+```{r}
+# Converte milano_buffer in un SpatVector
+rastar_buffer <- vect(milano_buffer)
+
+# Applica il crop e il mask usando terra
+def_raster <- crop(raster_data, rastar_buffer)
+def_raster <- mask(def_raster, rastar_buffer) #Applica una maschera al raster, mantenendo solo le aree all'interno del poligono specificato.
+```
+
+
+```{r}
+#rastar_buffer <- as(milano_buffer, "Spatial")
+#def_raster <- crop(raster_data, rastar_buffer)
+#def_raster<- mask(def_raster, rastar_buffer)
+
+```
+
+
+```{r}
+freq(def_raster)
+```
+
+
+
+
+```{r}
+# Plot del raster
+plot(def_raster, main = "Intersezione tra Buffer e Raster")
+
+# Aggiungere solo i bordi di Milano
+plot(st_geometry(milano), add = TRUE, border = "red", lwd = 2)
+ggsave("C:/Users/samir/Downloads/Intersezione_Buffer_Raster.png", width = 10, height = 10, dpi = 1000)
+```
+
+```{r}
+global(def_raster, fun = "sum", na.rm = TRUE)
+
+```
+
+
+
+
+
+```{r}
+library(foreign)
+```
+
+```{r}
+clc_legend <- read.dbf("C:/Users/samir/Downloads/legenda/Results/clc_legend.dbf", 
+                       as.is = TRUE)%>%
+   dplyr::select(value = GRID_CODE, landcov = LABEL3)
+#unique(values(def_raster))
+levels(def_raster) <- list(data.frame(ID = clc_legend$value, landcov = clc_legend$landcov))
+
+```
+
+
+
+```{r}
+stazioni_aria <- read_csv("C:/Users/samir/Downloads/dati_tesi/info_stazioni_aria.csv", show_col_types = FALSE) %>%
+  st_as_sf(coords = c("Long", "Lat"), crs = 4326) %>%  # EPSG:4326 per lat/long (gradi)
+  st_transform(crs = 3035) 
+buffer_stazioni <- st_buffer(stazioni_aria, dist = 500) #facciamo un buffer di 200metri
+
+```
+
+
+
+
+
+```{r}
+buffer_unito <- st_union(buffer_stazioni)
+ggplot() +
+  # Layer per i buffer
+  geom_sf(data = buffer_unito, fill = "lightblue", color = "blue", alpha = 0.4) + ggplot2::geom_sf(data = milano, fill = NA, lwd = .4, col = "black") +
+  # Layer per le stazioni
+  geom_sf(data = stazioni_aria, ggplot2::aes(col = .data$Source)) +
+  # Titoli e tema
+  labs(,
+       x = "Longitude",
+       y = "Latitude") +
+  theme_bw()
+
+#ggsave("C:/Users/samir/Downloads/buffer_area.png", width = 10, height = 10, dpi = 1000)
+```
+
+
+
+```{r}
+raster_values <- getValues(def_raster_raster)
+```
+
+```{r}
+library(exactextractr)
+```
+
+
+exact_extract() estrae i valori dei pixel da un raster sovrapponendo una geometria vettoriale.Per ogni poligono del vettore (es. un buffer), restituisce i pixel del raster che cadono all'interno del poligono o che lo intersecano
+```{r}
+result <- exact_extract(def_raster, buffer_stazioni, function(values, coverage_fraction) {
+  # Calcola il conteggio dei pixel per ciascun valore unico (ID del raster)
+  as.data.frame(table(values))  # Conta il numero di pixel per ciascun ID
+})
+```
+estraiamo la categoria predominante di land cover(ID)
+
+```{r}
+classe_predominante <- exact_extract(def_raster, buffer_stazioni, 'mode', 
+                                     append_cols = 'StationName', progress = FALSE) %>%
+  inner_join(clc_legend, by = c(mode = 'value'))
+classe_predominante 
+```
+```{r}
+raster_df <- as.data.frame(def_raster, xy = TRUE, na.rm = TRUE)
+```
+
+```{r}
+head(raster_df)
+```
+
+```{r}
+# Assegna un codice numerico ai valori di landcov
+raster_df$landcov_numeric <- as.numeric(as.factor(raster_df$landcov))
+
+# Crea il raster utilizzando la colonna numerica
+raster_new <- rasterFromXYZ(raster_df[, c("x", "y", "landcov_numeric")])
+
+# Specifica la proiezione, se nota
+crs(raster_new) <- "+proj=laea +ellps=GRS80 +units=m +no_defs"
+
+# Visualizza il raster
+plot(raster_new, main = "Ricostruzione del Raster")
+```
+
+
+
+```{r}
+buffer_stazioni %>% dplyr::select(.data$StationName, .data$geometry)
+```
+
+
+```{r}
+landcov_sums <- exact_extract(def_raster, buffer_stazioni, function(df) {
+  df %>%
+    group_by(StationName, value) %>%
+    summarize(total_sum = sum(coverage_fraction))  # Somma diretta
+}, summarize_df = TRUE, include_cols = 'StationName', progress = FALSE)
+landcov_sums <-landcov_sums %>%
+  left_join(clc_legend, by= "value" )
+```
+```{r}
+write.csv(landcov_sums, "C:/Users/samir/Downloads/dati_tesi/landcov_sums.csv", row.names = FALSE)
+```
+
+
+
+```{r}
+landcov_fracs <- exact_extract(def_raster, buffer_stazioni, function(df) {
+  df %>%
+    mutate(frac_total = coverage_fraction / sum(coverage_fraction)) %>%
+    group_by(StationName, value) %>%
+    summarize(freq = sum(frac_total)* 100) 
+}, summarize_df = TRUE, include_cols = 'StationName', progress = FALSE)
+```
+
+
+```{r}
+grafico_buffers <-landcov_fracs %>%
+  left_join(clc_legend, by= "value" )
+```
+
+
+
+```{r}
+
+ggplot(grafico_buffers, aes(x = value, y = freq, fill = landcov)) +
+  geom_bar(stat = "identity", position = "stack") +  # Usa 'stat = "identity"' per dati aggregati
+  facet_wrap(~ StationName) +
+  labs(
+    x = "Categories",
+    y = "Percentages",
+    fill = "Legenda"
+  ) +
+   theme(
+     strip.text = element_text(size = 7),
+    axis.text.x = element_text(angle = 0, hjust = 0.5, size = 6, lineheight = 1.2),
+     legend.position = "bottom",
+    legend.key.size = unit(0.4, "cm"),
+    legend.text = element_text(size = 7)  
+  ) +
+  scale_x_discrete(labels = function(x) str_wrap(x, width = 20)) +
+  scale_fill_manual(values = c(
+  "Airports" = "#e6cce6",
+  "Complex cultivation patterns" = "#ffe64d",
+  "Continuous urban fabric" = "#e6004d",
+  "Discontinuous urban fabric" = "#ff0000",
+  "Green urban areas" = "#ffa6ff",
+  "Industrial or commercial units" = "#cc4df2",
+  "Non-irrigated arable land" = "#ffffa8",
+  "Pastures" = "#e6e64d",
+  "Rice fields" = "#e6e600",
+  "Road and rail networks and associated land" = "#007fff",  #cc0000
+  "Sport and leisure facilities" = "#ffe6ff"
+))
+
+ggsave("C:/Users/samir/Downloads/buffer_composizione.png", width = 10, height = 10, dpi = 1000)
+```
+
+```{r}
+write.csv(grafico_buffers, "C:/Users/samir/Downloads/dati_tesi/land_cover_buffers.csv", row.names = FALSE)
+```
+
+
+# na imputation
+
+
+```{r}
+df <- read_delim(
+  "C:/Users/samir/Downloads/dati_tesi/pm10_milano_EU.csv",
+  delim = ",", 
+  show_col_types = FALSE
+)  %>% mutate(DatetimeBegin = as.Date(DatetimeBegin)) %>%    dplyr::select(AirQualityStationName, DatetimeBegin, Longitude, Latitude, PM10)
+```
+
+
+```{r}
+df_wide <- df %>% dplyr::select(AirQualityStationName,DatetimeBegin, PM10) %>%
+     pivot_wider(
+    names_from = AirQualityStationName,
+    values_from = PM10)
+```
+
+
+```{r}
+
+df_longs <- df_wide %>%
+  pivot_longer(
+    cols = -DatetimeBegin,  # Tutte le colonne tranne DatetimeBegin
+    names_to = "Station",   # Nome della colonna per le stazioni
+    values_to = "PM10"      # Nome della colonna per i valori di PM10
+  )
+missing_dates <- df_longs %>%
+  filter(is.na(PM10)) %>%   
+  rename(AirQualityStationName =Station) %>% # Filtra le righe con PM10 NA
+  group_by(AirQualityStationName) %>%                 # Raggruppa per stazione
+  summarise(missing_dates = paste0(DatetimeBegin, collapse = ", ")) %>% # Concatena le date
+  ungroup() 
+```
+
+
+
+
+
+```{r}
+df_longs
+```
+
+
+
+
+
+
+
+
+```{r}
+pm10_daily <- df %>%
+  filter(!is.na(PM10)) %>%    
+  mutate(DatetimeBegin = as.Date(DatetimeBegin)) %>%  # Rimuove i NA
+  group_by(DatetimeBegin) %>%  # Raggruppa per giorno
+  summarize(PM10 = mean(PM10, na.rm = TRUE)) %>%  # Calcola la media giornaliera
+  arrange(DatetimeBegin) 
+
+pm10_daily <- pm10_daily %>%
+  add_row(
+    DatetimeBegin = as.Date("2024-01-01"),
+    PM10 = pm10_daily %>% 
+      filter(DatetimeBegin == as.Date("2023-12-31")) %>%
+      pull(PM10)  # Copia il valore del giorno precedente
+  )
+```
+
+
+
+
+```{r}
+ts_pm_arpa  <- pm10_daily %>%
+  dplyr::select(PM10, DatetimeBegin) %>%
+  arrange(DatetimeBegin) %>%
+  pull(PM10) %>%
+  ts(frequency = 365, start = c(2022, 1)) 
+
+# Decomposizione STL
+decomp_arpa <- stl(ts_pm_arpa , s.window = "periodic")
+
+# Visualizza la decomposizione
+
+autoplot(decomp_arpa) +
+  labs(
+    title = "Decomposizione STL  stazioni ",
+    x = "Anno",
+    y = "concentrazioni"
+  )
+```
+L'aggregazione riduce il rumore specifico di ogni stazione, evidenziando componenti condivise come la stagionalità (es. picchi invernali) e il trend generale.
+La componente "trend" mostra una diminuzione graduale del PM10 dal 2022 al 2023. Questo indica che i livelli medi di PM10 sono effettivamente diminuiti nel periodo analizzato.
+
+
+```{r}
+air_sc23_24<- readr::read_delim(
+  "C:/Users/samir/Downloads/dati_tesi/air_sc23_24.csv",
+  delim = ",", 
+  show_col_types = FALSE
+)
+air_sc22_23 <- readr::read_delim(
+  "C:/Users/samir/Downloads/dati_tesi/air_sc22_23.csv",
+  delim = ",", 
+  show_col_types = FALSE
+)
+air_sensor <- bind_rows(air_sc23_24, air_sc22_23)
+air_sensor <- air_sensor %>%  
+  mutate(DatetimeBegin = as.Date(timestamp, format = "%Y-%m-%d")) %>%  
+  group_by(sensor_id,DatetimeBegin,  location, lon, lat, ) %>%  
+  summarize(PM10 = round(mean(PM1, na.rm = TRUE), 2), .groups = "drop") %>%
+  ungroup()
+```
+
+
+```{r}
+airpm_daily <- air_sensor %>%
+  filter(!is.na(PM10)) %>%    
+  mutate(DatetimeBegin = as.Date(DatetimeBegin)) %>%  # Rimuove i NA
+  group_by(DatetimeBegin) %>%  # Raggruppa per giorno
+  summarize(PM10 = mean(PM10, na.rm = TRUE)) %>%  # Calcola la media giornaliera
+  arrange(DatetimeBegin) 
+
+airpm_daily <- airpm_daily %>%
+  add_row(DatetimeBegin = as.Date(c("2024-01-01", "2023-07-14")), PM10 = NA) %>%
+  arrange(DatetimeBegin) %>%
+  mutate(PM10 = approx(DatetimeBegin, PM10, xout = DatetimeBegin, rule = 2)$y)#Estende i valori più vicini alle estremità  (il primo e l'ultimo valore conosciuto saranno utilizzati come riferimento per tutte le date esterne).
+
+```
+
+
+
+
+
+
+```{r}
+ts_pm_sensori  <-airpm_daily %>%
+  dplyr::select(PM10, DatetimeBegin) %>%
+  arrange(DatetimeBegin) %>%
+  pull(PM10) %>%
+  ts(frequency = 365, start = c(2022, 1)) 
+
+# Decomposizione STL
+decomp_sensori <- stl(ts_pm_sensori , s.window = "periodic")
+
+# Visualizza la decomposizione
+
+autoplot(decomp_sensori) +
+  labs(
+    title = "Decomposizione STL  stazioni ",
+    x = "Anno",
+    y = "concentrazioni"
+  )
+```
+
+
+
+
+```{r}
+# Componenti per le stazioni governative
+seasonal_arpa <- decomp_arpa$time.series[, "seasonal"]
+trend_arpa <- decomp_arpa$time.series[, "trend"]
+remainder_arpa <- decomp_arpa$time.series[, "remainder"]
+
+# Componenti per i sensori low-cost
+seasonal_sensori <- decomp_sensori$time.series[, "seasonal"]
+trend_sensori <- decomp_sensori$time.series[, "trend"]
+remainder_sensori <- decomp_sensori$time.series[, "remainder"]
+
+mean_arpa <- mean(ts_pm_arpa, na.rm = TRUE)  # Media delle stazioni governative
+mean_sensori <- mean(ts_pm_sensori, na.rm = TRUE)  # Media dei sensori low-cost
+sd_arpa <- sd(ts_pm_arpa, na.rm = TRUE)  # Deviazione standard delle stazioni governative
+sd_sensori <- sd(ts_pm_sensori, na.rm = TRUE)
+
+```
+
+
+media globale + componente stagionale  derivata dalla decomposizione stl e  rumore casuale moltiplicata per un variaiblity factori.
+
+
+
+```{r}
+#originali come medie 
+xts_pm_arpa <- xts(pm10_daily$PM10, order.by = pm10_daily$DatetimeBegin) 
+xts_pm_sensori <- xts(airpm_daily$PM10, order.by = airpm_daily$DatetimeBegin)
+```
+
+```{r}
+sd(pm10_daily$PM10)
+```
+```{r}
+sd(airpm_daily$PM10)
+```
+
+
+
+```{r}
+combined_data <- data.frame(
+  DatetimeBegin = index(xts_pm_arpa),
+  PM10_Arpa_Reale = coredata(xts_pm_arpa),
+  PM10_Arpa_Sintetica1 = coredata(pm10_synthetic_arpa1),
+  PM10_Arpa_Sintetica2 = coredata(pm10_synthetic_arpa2)
+
+)
+combined_data <- pivot_longer(combined_data, cols = -DatetimeBegin, names_to = "Serie", values_to = "PM10")
+
+ggplot(combined_data, aes(x = DatetimeBegin, y = PM10, color = Serie, linetype = Serie)) +
+  geom_line() +
+  labs(title = "Confronto Serie Temporali",
+       x = "Data",
+       y = "PM10 (µg/m³)",
+       color = "Serie",
+       linetype = "Serie") +
+  scale_color_manual(values = c("blue", "red", "black", "purple")) +
+  scale_linetype_manual(values = c(1, 1, 2, 2)) +
+  theme_minimal()
+```
+
+
+
+
+
+
+
+
+```{r}
+xts_synthetic_arpa <-  xts_synthetic_arpa[-nrow(xts_synthetic_arpa), ]
+xts_synthetic_sensori <-  xts_synthetic_sensori[-nrow(xts_synthetic_sensori), ]
+xts_pm_arpa <- xts_pm_arpa[-nrow(xts_pm_arpa), ]
+xts_pm_sensori <- xts_pm_sensori [-nrow(xts_pm_sensori ), ]
+
+```
+
+
+
+
+
+```{r}
+
+seasonal_pattern <- decomp$time.series[, "seasonal"][1:365]
+residuals <- decomp$time.series[, "remainder"]
+
+# Statistiche dei residui
+residual_mean <- mean(residuals)
+residual_sd <- sd(residuals)
+trend <- approx(
+  x = seq_along(decomp$time.series[, "trend"]),
+  y = decomp$time.series[, "trend"],
+  xout = seq(1, length(decomp$time.series[, "trend"]), length.out = n_days)
+)$y
+
+# Generazione del pattern stagionale (ripetizione per 2 anni)
+seasonal <- rep(seasonal_pattern, length.out = n_days)
+
+# Generazione dei residui casuali
+synthetic_residuals <- rnorm(n_days, mean = residual_mean, sd = residual_sd)
+
+# Serie sintetica
+synthetic_data <- trend + seasonal + synthetic_residuals
+
+# Visualizzazione
+synthetic_ts <- ts(synthetic_data, frequency = 365, start = c(2022, 1))
+autoplot(synthetic_ts) +
+  labs(
+    title = "Serie Temporale Sintetica PM10",
+    x = "Anno",
+    y = "PM10 (ug/m3)"
+  )
+```
+
+
+
+
+```{r}
+acf(residuals, main = "ACF dei residui")
+pacf(residuals, main = "PACF dei residui")
+```
+
+##  knn
+
+```{r}
+install.packages("DMwR2")
+```
+
+```{r}
+library(DMwR2)
+```
+
+
+```{r}
+int_inverno <- list(
+  interval(ymd("2021-12-21"), ymd("2022-03-19")),
+  interval(ymd("2022-12-21"), ymd("2023-03-19")),
+  interval(ymd("2023-12-21"), ymd("2024-01-31"))
+)
+
+int_estate <- list(
+  interval(ymd("2022-06-21"), ymd("2022-09-22")),
+  interval(ymd("2023-06-21"), ymd("2023-09-22"))
+)
+
+int_primavera <- list(
+  interval(ymd("2022-03-20"), ymd("2022-06-20")),
+  interval(ymd("2023-03-20"), ymd("2023-06-20"))
+)
+
+int_autunno <- list(
+  interval(ymd("2022-09-23"), ymd("2022-12-20")),
+  interval(ymd("2023-09-23"), ymd("2023-12-20"))
+)
+
+
+# Funzione per verificare se una data rientra in una lista di intervalli
+date_in_intervals <- function(data, intervals) {
+  any(sapply(intervals, function(intv) data %within% intv))
+}
+
+# Funzione custom per assegnare la stagione
+assegna_stagione <- function(data) {
+  if (date_in_intervals(data, int_inverno)) {
+    return(1)  # Inverno
+  } else if (date_in_intervals(data, int_estate)) {
+    return(3)  # Estate
+  } else if (date_in_intervals(data, int_primavera)) {
+    return(2)  # Primavera
+  } else if (date_in_intervals(data, int_autunno)) {
+    return(4)  # Autunno
+  } else {
+    return(NA)  # Non classificato
+  }
+}
+```
+
+```{r}
+#Ogni livello di percentuale riflette scenari reali di qualità dei dati
+set.seed(123)  
+
+#5%   37
+#10%  73
+#25% 183
+
+missing_value <- function(data = NULL, numero_valori_nulli = NULL, gaps = NULL) {
+  n <- length(data)  # Lunghezza della serie temporale (di default 730)
+  number_missing <- list()
+  indici_disponibili <- which(!is.na(data))  # Trova indici disponibili
+  
+  # Controllo: la somma dei gap non deve eccedere il numero totale di valori nulli
+  if (!is.null(gaps) && (sum(gaps) > numero_valori_nulli)) {
+    stop("La somma dei gap specificati supera il numero totale di valori mancanti desiderati.")
+  }
+  
+  # Inserimento dei gap
+  if (!is.null(gaps)) {
+    for (gap_length in gaps) {
+      # Se il gap è lungo (> 50), scegli un punto casuale in una finestra predefinita
+      if (gap_length > 50) {
+        window <- sample(c(1:60, 368:428), 1)
+        start_index <- window
+      } else {
+        # Per gap più corti, scegli un indice casuale
+        start_index <- sample(1:(n - gap_length + 1), 1)
+      }
+      
+      gap_indices <- start_index:(start_index + gap_length - 1)
+      
+      # Inserisci il gap solo se tutti i valori sono disponibili
+      if (all(!is.na(data[gap_indices]))) {
+        data[gap_indices] <- NA  # Inserisci NA nei punti specificati
+        number_missing <- append(number_missing, list(gap_indices))  # Registra gli indici
+        indici_disponibili <- setdiff(indici_disponibili, gap_indices)  # Aggiorna indici disponibili
+      }
+    }
+  }
+  
+  # Calcola i valori mancanti già inseriti (tramite gap)
+  total_missing_inserted <- sum(sapply(number_missing, length))
+  
+  # Calcola i valori mancanti singoli da aggiungere
+  single_missing_to_insert <- numero_valori_nulli - total_missing_inserted
+  
+  # Inserisci i valori mancanti singoli
+  if (single_missing_to_insert > 0) {
+    single_missing_indices <- sample(indici_disponibili, single_missing_to_insert)
+    data[single_missing_indices] <- NA
+    number_missing <- append(number_missing, as.list(single_missing_indices))
+  }
+  
+  # Restituisci il dataset con NA
+  return(data)
+}
+
+```
+
+
+```{r}
+generate_datasets <- function(original_xts, synthetic_xts_list, missing_configs) {
+  set.seed(12445)
+  # `original_xts`: serie originale con dati reali
+  # `synthetic_xts_list`: lista di serie sintetiche
+  # `missing_configs`: lista di configurazioni per valori mancanti (percentuali e gaps)
+
+  # Step 1: Crea il dataset completo
+  complete_datasets <- lapply(c(list(original_xts), synthetic_xts_list), function(xts_data) {
+    xts_data %>%
+      as.data.frame(row.names = NULL) %>%
+      mutate(DatetimeBegin = index(xts_data)) %>%
+      rename(PM10 = V1)
+  })
+  complete_dataset <- bind_rows(complete_datasets) %>%
+    mutate(DatetimeBegin = as.Date(DatetimeBegin))
+  
+  # Step 2: Crea il dataset incompleto
+  incomplete_datasets <- Map(function(xts_data, config) {
+    missing_value(xts_data, numero_valori_nulli = config$missing, gaps = config$gaps) %>%
+      as.data.frame(row.names = NULL) %>%
+      mutate(DatetimeBegin = index(xts_data)) %>%
+      rename(PM10 = V1)
+  }, c(list(original_xts), synthetic_xts_list), missing_configs)
+  
+  incomplete_dataset <- bind_rows(incomplete_datasets) %>%
+    mutate(DatetimeBegin = as.Date(DatetimeBegin))
+  
+  # Step 3: Trova indici mancanti
+  missing_indices <- which(is.na(incomplete_dataset$PM10))
+  
+  # Restituisci entrambi i dataset e gli indici mancanti
+  return(list(
+    completo = complete_dataset,
+    incompleto = incomplete_dataset,
+    missing_indices = missing_indices
+  ))
+}
+```
+
+
+```{r}
+knn_model <- function(dati_completi, missing_indices) {
+  cl <- makeCluster(detectCores() - 1) # Usa tutti i core meno uno
+  registerDoParallel(cl)
+  on.exit(stopCluster(cl))
+
+    dati_completi <- dati_completi %>% 
+  mutate(day_of_year = yday(DatetimeBegin),
+          year = year(DatetimeBegin),  # Estrae l'anno
+          month = month(DatetimeBegin),
+            season = sapply(DatetimeBegin, assegna_stagione),
+         lag1 = lag(PM10, 1),
+         lag2 = lag(PM10, 2)
+         )  %>% left_join(df_giornaliero, by=("DatetimeBegin")) %>% dplyr::select(-DatetimeBegin)  %>%  drop_na()
+   
+   #serviranno una volta predetti i valori
+  
+    test_data <- dati_completi %>% slice(missing_indices) %>% mutate(PM10 = NA)
+   train_data <- dati_completi %>% slice(-missing_indices)
+   #print(colSums(is.na(train_data)))
+  real_values <- dati_completi%>% slice(missing_indices) %>% dplyr::pull(PM10)
+
+  #Standardizzazione (media nulla e deviazione standard 1)
+  #viene creato un oggetto che memorizza deviazione  e mean di ciascuna variabile predittiva
+preprocess_params <- preProcess(
+  train_data %>% dplyr::select(-c(PM10, day_of_year,year,month)),  # Escludi anche day_of_year
+  method = c("center", "scale")
+)
+train_data<- predict(preprocess_params, train_data)
+test_data <- predict(preprocess_params, test_data) 
+  
+set.seed(12445)
+# Define the model using caret's train function
+control <- trainControl(method='repeatedcv', #"cv"
+                        number=10, 
+                        repeats=3,
+                        search= "grid") #g
+
+tunegrid <- expand.grid(
+  k = 1:15 
+#  distance = c("euclidean", "manhattan"), 
+ # weights = c("uniform", "distance")
+)
+
+
+set.seed(123)
+
+fit <- train(PM10~., 
+             method     = "knn",
+             tuneGrid   = tunegrid,  #expand.grid(k = 1:15)
+             trControl  = control,
+             metric     = "RMSE",
+             data       = train_data)
+
+
+
+
+print(fit)
+
+set.seed(123)
+# Previsione sui dati incompleti
+predictions <- predict(fit, newdata = test_data)
+
+  # Valutazione: confronta i valori reali con le previsioni
+mae <- mean(abs(real_values - predictions), na.rm = TRUE)
+rmse <- sqrt(mean((real_values - predictions)^2, na.rm = TRUE))
+r2 <- cor(real_values, predictions, use = "complete.obs")^2
+
+
+ return(list(
+    results = summary(fit),
+    predictions = predictions,
+    metrics = data.frame(MAE = mae, RMSE = rmse, R2 = r2)
+    
+  ))
+
+}
+```
+
+
+## generazione serie sintetiche
+
+
+```{r}
+# 15---> 2% (45)      # 29---> 4% (87)     # 44---> 6% (132)  
+variability_factor <- abs(seasonal_arpa) / max(abs(seasonal_arpa))
+pm10_synthetic_arpa1 <- mean_arpa + seasonal_arpa + rnorm(length(seasonal_arpa), mean = 0, sd = 2) * variability_factor
+pm10_synthetic_arpa2 <- mean_arpa + seasonal_arpa + rnorm(length(seasonal_arpa), mean = 0, sd = 3) * variability_factor
+
+pm10_synthetic_arpa1 <- pm10_synthetic_arpa1[-length(pm10_synthetic_arpa1)] %>%
+  xts(order.by = seq(ymd("2022-01-01"), ymd("2023-12-31"), by = "day"))
+
+pm10_synthetic_arpa2 <- pm10_synthetic_arpa2[-length(pm10_synthetic_arpa2)] %>%
+  xts(order.by = seq(ymd("2022-01-01"), ymd("2023-12-31"), by = "day"))
+
+#originali 
+pm10_daily1 <- pm10_daily  %>% slice(-n())
+xts_pm_arpa  <- xts(pm10_daily1$PM10, order.by = pm10_daily1$DatetimeBegin) 
+```
+
+
+```{r}
+variability_factor <- abs(seasonal_sensori) / max(abs(seasonal_sensori))
+pm10_synthetic_sensori1 <- mean_sensori + seasonal_sensori + rnorm(length(seasonal_sensori), mean = 0, sd = 2) * variability_factor
+pm10_synthetic_sensori2 <- mean_sensori + seasonal_sensori + rnorm(length(seasonal_sensori), mean = 0, sd = 3) * variability_factor
+pm10_synthetic_sensori3 <- mean_sensori + seasonal_sensori + rnorm(length(seasonal_sensori), mean = 0, sd = 4) * variability_factor
+
+
+pm10_synthetic_sensori1 <-  pm10_synthetic_sensori1[-length(pm10_synthetic_sensori1)] %>% xts(pm10_synthetic_sensori, order.by = seq(ymd("2022-01-01"), ymd("2023-12-31"), by = "day"))
+pm10_synthetic_sensori2 <- pm10_synthetic_sensori2[-length(pm10_synthetic_sensori2)] %>% xts(pm10_synthetic_sensori2, order.by = seq(ymd("2022-01-01"), ymd("2023-12-31"), by = "day"))
+pm10_synthetic_sensori3 <- pm10_synthetic_sensori3[-length(pm10_synthetic_sensori3)] %>% xts(pm10_synthetic_sensori3, order.by = seq(ymd("2022-01-01"), ymd("2023-12-31"), by = "day"))
+airpm_daily1 <- airpm_daily  %>% slice(-n())
+xts_pm_sensori <- xts(airpm_daily1$PM10, order.by = airpm_daily1$DatetimeBegin)
+```
+
+
+
+
+
+
+
+
+
+
+```{r}
+nrow(pm10_synthetic_sensori1) + nrow(pm10_synthetic_sensori2) + nrow(pm10_synthetic_sensori3) +  nrow(xts_pm_sensori)
+```
+```{r}
+synthetic_xts_list <- list(pm10_synthetic_sensori1, pm10_synthetic_sensori2, pm10_synthetic_sensori3)
+missing_configs <- list(
+  list(missing = 105, gaps = c(3, 2,2,14,3,5,6,4,3,8)),  # Configurazione per la serie originale
+  list(missing = 110, gaps = c(2, 2,4,5, 19,24,2,3,2,2,2)),  # Configurazione per synthetic_arpa1
+  list(missing = 113, gaps = c(6, 2, 2,30,2,3,12,2,5,4,3)),  # Configurazione per synthetic_arpa2
+  list(missing = 110, gaps = c(6, 2, 2,12 ,4,69))) 
+datasets <- generate_datasets(xts_pm_sensori, synthetic_xts_list, missing_configs)
+```
+
+
+
+
+```{r}
+synthetic_xts_list <- list(pm10_synthetic_sensori1, pm10_synthetic_sensori2, pm10_synthetic_sensori3)
+missing_configs <- list(
+  list(missing = 140, gaps = c(3, 2,2,14,3,5,6,4,3,8,35,15)),  # Configurazione per la serie originale
+  list(missing = 150, gaps = c(2, 2,4,5, 19,24,2,3,2,2,2,60)),  # Configurazione per synthetic_arpa1
+  list(missing = 144, gaps = c(6, 2, 2,30,2,3,12,2,5,4,3,17)),  # Configurazione per synthetic_arpa2
+  list(missing = 150, gaps = c(6, 2, 2,12 ,4,69))) 
+datasets <- generate_datasets(xts_pm_sensori, synthetic_xts_list, missing_configs)
+
+
+```
+
+
+```{r}
+benchmark_5_completo <- datasets $completo 
+benchmark_5_incompleto <- datasets $incompleto
+missing_indices <- datasets $missing_indices
+```
+
+
+```{r}
+results <- knn_model (benchmark_5_completo, missing_indices )
+```
+```{r}
+results$metrics
+```
+
+
+
+```{r}
+results$metrics
+```
+
+
+
+
+
+
+```{r}
+ 
+# 15---> 2% (45)      # 29---> 4% (87)     # 44---> 6% (132)    # ---> 8% (175)     # 44---> 2% (219)
+#synthetic_xts_list <- list(pm10_synthetic_arpa1, pm10_synthetic_arpa2)
+
+#missing_configs <- list(
+#  list(missing = 15, gaps = c(3, 2)),  # Configurazione per la serie originale
+#  list(missing = 10, gaps = c(2, 2)),  # Configurazione per synthetic_arpa1
+ # list(missing = 20, gaps = c(6, 2, 2))) # Configurazione per synthetic_arpa2
+
+
+#datasets <- generate_datasets(xts_pm_arpa, synthetic_xts_list, missing_configs)
+
+# 29---> 4% (87)     
+#synthetic_xts_list <- list(pm10_synthetic_arpa1, pm10_synthetic_arpa2)
+
+#missing_configs <- list(
+#  list(missing = 30, gaps = c(3, 2,5,3,2)),  # Configurazione per la serie originale
+#  list(missing = 25, gaps = c(2, 2,2,2,3,7,4)),  # Configurazione per synthetic_arpa1
+#  list(missing = 32, gaps = c(6, 2, 2,2,4))) # Configurazione per synthetic_arpa2
+#datasets <- generate_datasets(xts_pm_arpa, synthetic_xts_list, missing_configs)
+
+
+# 44---> 6% (132)  
+#synthetic_xts_list <- list(pm10_synthetic_arpa1, pm10_synthetic_arpa2)
+
+#missing_configs <- list(
+  #list(missing = 40, gaps = c(3, 2,9,3,2,2,2)),  # Configurazione per la serie originale
+  #list(missing = 50, gaps = c(2, 2,2,2,3,3,4,2,2)),  # Configurazione per synthetic_arpa1
+  #list(missing = 42, gaps = c(6, 2, 2,2,2,2)))  # Configurazione per synthetic_arpa2
+#datasets <- generate_datasets(xts_pm_arpa, synthetic_xts_list, missing_configs)
+
+# 44---> 8% (175)  
+#synthetic_xts_list <- list(pm10_synthetic_arpa1, pm10_synthetic_arpa2)
+
+#missing_configs <- list(
+  #list(missing = 50, gaps = c(3, 2,6,3,2,2,2,3,2,2)),  # Configurazione per la serie originale
+  #list(missing = 65, gaps = c(2, 2,2,2,3,3,4,2,2,8,6,3)),  # Configurazione per synthetic_arpa1
+  #list(missing = 60, gaps = c(6, 2, 2,2,2,2,3,5,3,2)))  # Configurazione per synthetic_arpa2
+#datasets <- generate_datasets(xts_pm_arpa, synthetic_xts_list, missing_configs)
+
+
+# 44---> 10% (219)  
+#synthetic_xts_list <- list(pm10_synthetic_arpa1, pm10_synthetic_arpa2)
+
+#missing_configs <- list(
+  #list(missing = 68, gaps = c(3, 2,6,3,2,2,2,3,2,2)),  # Configurazione per la serie originale
+  #list(missing = 77, gaps = c(2, 2,2,2,3,3,4,2,2,8,6,3)),  # Configurazione per synthetic_arpa1
+  #list(missing = 74, gaps = c(6, 2, 2,2,2,2,3,5,3,2,4,6)))  # Configurazione per synthetic_arpa2
+#datasets <- generate_datasets(xts_pm_arpa, synthetic_xts_list, missing_configs)
+
+```
+
+
+
+
+
+
+
+
+## sensori knn
+
+
+
+
+
+```{r}
+# 37---> 5% (148)      # 73---> 10% (292)     # 183---> 25% (732)  
+#synthetic_xts_list <- list(pm10_synthetic_sensori1, pm10_synthetic_sensori2, pm10_synthetic_sensori3)
+#missing_configs <- list(
+#  list(missing = 20, gaps = c(3, 2)),  # Configurazione per la serie originale
+#  list(missing = 45, gaps = c(2, 2,4,5, 19)),  # Configurazione per synthetic_arpa1
+#  list(missing = 50, gaps = c(6, 2, 2,30)),  # Configurazione per synthetic_arpa2
+#  list(missing = 33, gaps = c(6, 2, 2,12 ,4))) 
+#datasets <- generate_datasets(xts_pm_sensori, synthetic_xts_list, missing_configs)
+
+# 73---> 10% (292)
+#synthetic_xts_list <- list(pm10_synthetic_sensori1, pm10_synthetic_sensori2, pm10_synthetic_sensori3)
+#missing_configs <- list(
+#  list(missing = 45, gaps = c(3, 2,2,14,3,5,6)),  # Configurazione per la serie originale
+#  list(missing = 70, gaps = c(2, 2,4,5, 19,24,2,3)),  # Configurazione per synthetic_arpa1
+#  list(missing = 67, gaps = c(6, 2, 2,30,2,3)),  # Configurazione per synthetic_arpa2
+#  list(missing = 110, gaps = c(6, 2, 2,12 ,4,69))) 
+#datasets <- generate_datasets(xts_pm_sensori, synthetic_xts_list, missing_configs)
+
+# 183---> 25% (732)
+#synthetic_xts_list <- list(pm10_synthetic_sensori1, #pm10_synthetic_sensori2, pm10_synthetic_sensori3)
+#missing_configs <- list(
+ # list(missing = 155, gaps = c(3, 2,2,14,3,5,6,18,32,4,5)),  # Configu per la serie originale
+ # list(missing = 190, gaps = c(2, 2,4,5, 19,24,2,82,10)),  # Configurazione per synthetic_arpa1
+ # list(missing = 201, gaps = c(6, 2, 2,30,2,3,24,10,17)),  # Configurazione per synthetic_arpa2
+ # list(missing = 186, gaps = c(6, 2, 2,12,4,74,2,2))) 
+#datasets <- generate_datasets(xts_pm_sensori, synthetic_xts_list, #missing_configs)
+
+
+# 109---> 15% (438)
+
+#synthetic_xts_list <- list(pm10_synthetic_sensori1, pm10_synthetic_sensori2, pm10_synthetic_sensori3)
+#missing_configs <- list(
+#  list(missing = 105, gaps = c(3, 2,2,14,3,5,6,4,3,8)),  # Configurazione per la serie originale
+#  list(missing = 110, gaps = c(2, 2,4,5, 19,24,2,3,2,2,2)),  # Configurazione per synthetic_arpa1
+#  list(missing = 113, gaps = c(6, 2, 2,30,2,3,12,2,5,4,3)),  # Configurazione per synthetic_arpa2
+#  list(missing = 110, gaps = c(6, 2, 2,12 ,4,69))) 
+#datasets <- generate_datasets(xts_pm_sensori, synthetic_xts_list, missing_configs)
+
+
+
+# 146---> 20% (584)
+
+#synthetic_xts_list <- list(pm10_synthetic_sensori1, pm10_synthetic_sensori2, pm10_synthetic_sensori3)
+#missing_configs <- list(
+#  list(missing = 140, gaps = c(3, 2,2,14,3,5,6,4,3,8,35,15)),  # Configurazione per la serie originale
+#  list(missing = 150, gaps = c(2, 2,4,5, 19,24,2,3,2,2,2,60)),  # Configurazione per synthetic_arpa1
+#  list(missing = 144, gaps = c(6, 2, 2,30,2,3,12,2,5,4,3,17)),  # Configurazione per synthetic_arpa2
+#  list(missing = 150, gaps = c(6, 2, 2,12 ,4,69))) 
+#datasets <- generate_datasets(xts_pm_sensori, synthetic_xts_list, missing_configs)
+
+```
+
+
+
+
+
+
+
+
+
+##   Cross-Validation rf
+
+mtry: Number of variables randomly sampled as candidates at each split.
+ntree: Number of trees to grow.
+
+RF è robusto a variabili che hanno scale diverse
+
+```{r}
+install.packages("caret")
+```
+
+```{r}
+library(caret)
+```
+
+```{r}
+# 15---> 2% (45)      # 29---> 4% (87)     # 44---> 6% (132)  
+variability_factor <- abs(seasonal_arpa) / max(abs(seasonal_arpa))
+pm10_synthetic_arpa1 <- mean_arpa + seasonal_arpa + rnorm(length(seasonal_arpa), mean = 0, sd = 2) * variability_factor
+pm10_synthetic_arpa2 <- mean_arpa + seasonal_arpa + rnorm(length(seasonal_arpa), mean = 0, sd = 3) * variability_factor
+
+pm10_synthetic_arpa1 <- pm10_synthetic_arpa1[-length(pm10_synthetic_arpa1)] %>%
+  xts(order.by = seq(ymd("2022-01-01"), ymd("2023-12-31"), by = "day"))
+
+pm10_synthetic_arpa2 <- pm10_synthetic_arpa2[-length(pm10_synthetic_arpa2)] %>%
+  xts(order.by = seq(ymd("2022-01-01"), ymd("2023-12-31"), by = "day"))
+
+#originali 
+pm10_daily1 <- pm10_daily  %>% slice(-n())
+xts_pm_arpa  <- xts(pm10_daily1$PM10, order.by = pm10_daily1$DatetimeBegin) 
+```
+
+
+
+
+```{r}
+# 15---> 2% (45)      # 29---> 4% (87)     # 44---> 6% (132)  
+synthetic_xts_list <- list(pm10_synthetic_arpa1, pm10_synthetic_arpa2)
+
+missing_configs <- list(
+  list(missing = 15, gaps = c(3, 2)),  # Configurazione per la serie originale
+  list(missing = 10, gaps = c(2, 2)),  # Configurazione per synthetic_arpa1
+  list(missing = 20, gaps = c(6, 2, 2))  # Configurazione per synthetic_arpa2
+)
+
+datasets <- generate_datasets(xts_pm_arpa, synthetic_xts_list, missing_configs)
+```
+
+
+
+```{r}
+variability_factor <- abs(seasonal_sensori) / max(abs(seasonal_sensori))
+pm10_synthetic_sensori1 <- mean_sensori + seasonal_sensori + rnorm(length(seasonal_sensori), mean = 0, sd = 2) * variability_factor
+pm10_synthetic_sensori2 <- mean_sensori + seasonal_sensori + rnorm(length(seasonal_sensori), mean = 0, sd = 3) * variability_factor
+pm10_synthetic_sensori3 <- mean_sensori + seasonal_sensori + rnorm(length(seasonal_sensori), mean = 0, sd = 4) * variability_factor
+
+
+pm10_synthetic_sensori1 <-  pm10_synthetic_sensori1[-length(pm10_synthetic_sensori1)] %>% xts(pm10_synthetic_sensori, order.by = seq(ymd("2022-01-01"), ymd("2023-12-31"), by = "day"))
+pm10_synthetic_sensori2 <- pm10_synthetic_sensori2[-length(pm10_synthetic_sensori2)] %>% xts(pm10_synthetic_sensori2, order.by = seq(ymd("2022-01-01"), ymd("2023-12-31"), by = "day"))
+pm10_synthetic_sensori3 <- pm10_synthetic_sensori3[-length(pm10_synthetic_sensori3)] %>% xts(pm10_synthetic_sensori3, order.by = seq(ymd("2022-01-01"), ymd("2023-12-31"), by = "day"))
+airpm_daily1 <- airpm_daily  %>% slice(-n())
+xts_pm_sensori <- xts(airpm_daily1$PM10, order.by = airpm_daily1$DatetimeBegin)
+```
+
+
+
+
+```{r}
+synthetic_xts_list <- list(pm10_synthetic_arpa1, pm10_synthetic_arpa2)
+
+missing_configs <- list(
+  list(missing = 15, gaps = c(3, 2)),  # Configurazione per la serie originale
+  list(missing = 10, gaps = c(2, 2)),  # Configurazione per synthetic_arpa1
+  list(missing = 20, gaps = c(6, 2, 2))) # Configurazione per synthetic_arpa2
+
+
+datasets <- generate_datasets(xts_pm_arpa, synthetic_xts_list, missing_configs)
+
+```
+
+
+
+
+
+
+
+
+
+
+
+```{r}
+# 37---> 5% (148)      # 73---> 10% (292)     # 183---> 25% (732)  
+synthetic_xts_list <- list(pm10_synthetic_sensori1, pm10_synthetic_sensori2, pm10_synthetic_sensori3)
+missing_configs <- list(
+  list(missing = 20, gaps = c(3, 2)),  # Configurazione per la serie originale
+  list(missing = 45, gaps = c(2, 2,4,5, 19)),  # Configurazione per synthetic_arpa1
+  list(missing = 50, gaps = c(6, 2, 2,30)),  # Configurazione per synthetic_arpa2
+  list(missing = 33, gaps = c(6, 2, 2,12 ,4))) 
+datasets <- generate_datasets(xts_pm_sensori, synthetic_xts_list, missing_configs)
+
+
+```
+
+
+```{r}
+benchmark_5_completo <- datasets $completo 
+benchmark_5_incompleto <- datasets $incompleto
+missing_indices <- datasets $missing_indices
+```
+
+
+
+
+ For example, in an R package like randomForest, the number of trees (ntree) is a hyperparameter. 
+Grid search takes the guesswork out of this entire process. Instead of manually tuning one hyperparameter at a time, grid search methodically tests all possible combinations of a defined set of hyperparameters.For a random forest, we might want to tune hyperparameters like mtry (the number of features to consider at each split) and ntree (the number of trees in the forest).
+
+
+```{r}
+library(doParallel)
+library(imputeTS)
+```
+
+
+
+```{r}
+tree_model <- function(dati_completi, missing_indices) {
+  
+   cl <- makeCluster(detectCores() - 1) # Usa tutti i core meno uno
+  registerDoParallel(cl)
+  on.exit(stopCluster(cl))
+  
+  dati_completi <- dati_completi %>% 
+  mutate(day_of_year = yday(DatetimeBegin),
+          year = year(DatetimeBegin),  # Estrae l'anno
+          month = month(DatetimeBegin),
+        season = sapply(DatetimeBegin, assegna_stagione),#stagione
+         lag1 = lag(PM10, 1), # lag1 = na_kalman(lag(PM10, 1), model = "StructTS"),
+         lag2 = lag(PM10, 2), #lag2 = na_kalman(lag(PM10, 2), model = "StructTS"),
+          day_of_month = day(DatetimeBegin),
+         )  %>% left_join(df_giornaliero, by=("DatetimeBegin")) %>% dplyr::select(-DatetimeBegin)  %>%  drop_na()
+   
+  
+   test_data <- dati_completi %>% slice(missing_indices) %>% mutate(PM10 = NA)
+   train_data <- dati_completi %>% slice(-missing_indices)
+   #print(colSums(is.na(train_data)))
+  real_values <- dati_completi%>% slice(missing_indices) %>% dplyr::pull(PM10)
+
+set.seed(12445)
+
+# Define the model using caret's train function
+control <- trainControl(method='repeatedcv', #"cv"
+                        number=5, 
+                        repeats=3,
+                        search= "grid") #g
+
+
+set.seed(123)
+#Number randomely variable selected is mtry
+
+##create tunegrid with 15 values from 1:15 for mtry to tunning model. 
+tunegrid <- expand.grid(mtry = (1:15))   #definisce il numero di variabili indipendenti considerate in ogni split di un albero.
+
+modellist <- list()
+for (ntree in  c(50, 100, 150,300,500)) {
+set.seed(123)
+fit <- train(PM10~., 
+                      data=train_data, 
+                      method='rf', 
+                      metric= "RMSE", 
+                      tuneGrid=tunegrid, 
+                      trControl=control,
+                      ntree = ntree) 
+	key <- toString(ntree)
+	modellist[[key]] <- fit
+}
+
+# compare results
+results <- resamples(modellist)
+ # Miglior modello
+str(modellist[[1]]$results)
+
+bestModel <- modellist[[which.min(sapply(modellist, function(model)
+  mean(model$results$RMSE)))]]
+cat("n alberi best modello", names(which.min(sapply(modellist, function(x) min(x$results$RMSE)))), "\n")
+
+# Previsione sui dati incompleti
+predictions <- predict(bestModel, newdata = test_data)
+
+  # Valutazione: confronta i valori reali con le previsioni
+mae <- mean(abs(real_values - predictions), na.rm = TRUE)
+rmse <- sqrt(mean((real_values - predictions)^2, na.rm = TRUE))
+r2 <- cor(real_values, predictions, use = "complete.obs")^2
+
+
+ return(list(
+    results = summary(results),
+     best_model = bestModel,
+    predictions = predictions,
+    metrics = data.frame(MAE = mae, RMSE = rmse, R2 = r2)
+    
+  ))
+#Valutazione dell'Approccio di Imputazione Bi-Direzionale:
+}
+```
+
+
+
+```{r}
+results <- tree_model(benchmark_5_completo, missing_indices )
+```
+
+```{r}
+varImp(results$best_model)
+```
+
+```{r}
+results$best_model$finalModel
+```
+Il modello selezionato ha utilizzato 500 alberi (ntree).Il modello ha scelto di considerare 7 variabili per ogni split durante la costruzione di ciascun albero. Questo valore è stato ottimizzato durante la grid search.
+L'84.1% della variabilità nei dati è spiegata dal modello.
+
+
+
+
+
+```{r}
+randomForest::varImpPlot(results$best_model$finalModel)
+```
+
+```{r}
+results$metrics
+```
+
+```{r}
+sum(is.na(df_longs$PM10))
+```
+
+
+
+
+
+```{r}
+results$best_model
+
+
+```
+
+## keras
+
+```{r}
+#install.packages("keras")
+install.packages("tensorflow")
+```
+
+```{r}
+library(keras3)
+library(tensorflow)
+```
+
+
+Keras in R non è un'implementazione autonoma, ma un'interfaccia per Keras e TensorFlow. Per eseguire qualsiasi operazione con Keras, hai bisogno di TensorFlow, che è una libreria Python.
+
+
+```{r}
+install_tensorflow()
+```
+
+
+
+
+
+```{r}
+# 37---> 5% (148)      # 73---> 10% (292)     # 183---> 25% (732)  
+synthetic_xts_list <- list(pm10_synthetic_sensori1, pm10_synthetic_sensori2, pm10_synthetic_sensori3)
+missing_configs <- list(
+  list(missing = 20, gaps = c(3, 2)),  # Configurazione per la serie originale
+  list(missing = 45, gaps = c(2, 2,4,5, 19)),  # Configurazione per synthetic_arpa1
+  list(missing = 50, gaps = c(6, 2, 2,30)),  # Configurazione per synthetic_arpa2
+  list(missing = 33, gaps = c(6, 2, 2,12 ,4))) 
+datasets <- generate_datasets(xts_pm_sensori, synthetic_xts_list, missing_configs)
+
+```
+
+
+```{r}
+
+# 29---> 4% (87)     
+#synthetic_xts_list <- list(pm10_synthetic_arpa1, pm10_synthetic_arpa2)
+
+#missing_configs <- list(
+ # list(missing = 30, gaps = c(3, 2,5,3,2)),  # Configurazione per la serie originale
+ # list(missing = 25, gaps = c(2, 2,2,2,3,7,4)),  # Configurazione per synthetic_arpa1
+#  list(missing = 32, gaps = c(6, 2, 2,2,4))) # Configurazione per synthetic_arpa2
+#datasets <- generate_datasets(xts_pm_arpa, synthetic_xts_list, missing_configs)
+
+
+# 44---> 6% (132)  
+synthetic_xts_list <- list(pm10_synthetic_arpa1, pm10_synthetic_arpa2)
+
+missing_configs <- list(
+  list(missing = 40, gaps = c(3, 2,9,3,2,2,2)),  # Configurazione per la serie originale
+  list(missing = 50, gaps = c(2, 2,2,2,3,3,4,2,2)),  # Configurazione per synthetic_arpa1
+  list(missing = 42, gaps = c(6, 2, 2,2,2,2)))  # Configurazione per synthetic_arpa2
+datasets <- generate_datasets(xts_pm_arpa, synthetic_xts_list, missing_configs)
+```
+
+```{r}
+# 37---> 5% (148)      # 73---> 10% (292)     # 183---> 25% (732)  
+synthetic_xts_list <- list(pm10_synthetic_sensori1, pm10_synthetic_sensori2, pm10_synthetic_sensori3)
+missing_configs <- list(
+  list(missing = 20, gaps = c(3, 2)),  # Configurazione per la serie originale
+  list(missing = 45, gaps = c(2, 2,4,5, 19)),  # Configurazione per synthetic_arpa1
+  list(missing = 50, gaps = c(6, 2, 2,30)),  # Configurazione per synthetic_arpa2
+  list(missing = 33, gaps = c(6, 2, 2,12 ,4))) 
+datasets <- generate_datasets(xts_pm_sensori, synthetic_xts_list, missing_configs)
+
+#synthetic_xts_list <- list(pm10_synthetic_sensori1, pm10_synthetic_sensori2, pm10_synthetic_sensori3)
+#missing_configs <- list(
+# list(missing = 45, gaps = c(3, 2,2,14,3,5,6)),  # Configurazione per la serie originale
+#  list(missing = 70, gaps = c(2, 2,4,5, 19,24,2,3)),  # Configurazione per synthetic_arpa1
+#  list(missing = 67, gaps = c(6, 2, 2,30,2,3)),  # Configurazione per synthetic_arpa2
+#  list(missing = 110, gaps = c(6, 2, 2,12 ,4,69))) 
+#datasets <- generate_datasets(xts_pm_sensori, synthetic_xts_list, missing_configs)
+
+#synthetic_xts_list <- list(pm10_synthetic_sensori1, pm10_synthetic_sensori2, pm10_synthetic_sensori3)
+#missing_configs <- list(
+#  list(missing = 155, gaps = c(3, 2,2,14,3,5,6,18,32,4,5)),  # Configu per la serie originale
+#  list(missing = 190, gaps = c(2, 2,4,5, 19,24,2,82,10)),  # Configurazione per synthetic_arpa1
+# list(missing = 201, gaps = c(6, 2, 2,30,2,3,24,10,17)),  # Configurazione per synthetic_arpa2
+ # list(missing = 186, gaps = c(6, 2, 2,12,4,74,2,2))) 
+#datasets <- generate_datasets(xts_pm_sensori, synthetic_xts_list, missing_configs)
+```
+
+
+
+
+
+
+
+
+
+
+```{r}
+synthetic_xts_list <- list(pm10_synthetic_arpa1, pm10_synthetic_arpa2)
+
+missing_configs <- list(
+  list(missing = 40, gaps = c(3, 2,9,3,2,2,2)),  # Configurazione per la serie originale
+  list(missing = 50, gaps = c(2, 2,2,2,3,3,4,2,2)),  # Configurazione per synthetic_arpa1
+  list(missing = 42, gaps = c(6, 2, 2,2,2,2)))  # Configurazione per synthetic_arpa2
+datasets <- generate_datasets(xts_pm_arpa, synthetic_xts_list, missing_configs)
+```
+
+
+
+```{r}
+benchmark_5_incompleto <- datasets $incompleto
+missing_indices <- datasets $missing_indices
+```
+
+
+
+
+
+
+
+
+```{r}
+dati_completis <- benchmark_5_completo %>% 
+  mutate(day_of_year = yday(DatetimeBegin),
+          year = year(DatetimeBegin),  # Estrae l'anno
+          month = month(DatetimeBegin),
+        season = sapply(DatetimeBegin, assegna_stagione),# stagione
+          day_of_month = day(DatetimeBegin) , # Giorno del mese
+         lag1 = lag(PM10, 1),
+         lag2 = lag(PM10, 2)
+         )  %>% left_join(df_giornaliero, by=("DatetimeBegin")) %>% dplyr::select(-DatetimeBegin)  %>%  drop_na()
+```
+
+
+
+
+```{r}
+mlp_model <- function(dati_completi, missing_indices) {
+  
+ 
+dati_completis <- benchmark_5_completo %>% 
+  mutate(day_of_year = yday(DatetimeBegin),
+          year = year(DatetimeBegin),  # Estrae l'anno
+          month = month(DatetimeBegin),
+        season = sapply(DatetimeBegin, assegna_stagione),# stagione
+          day_of_month = day(DatetimeBegin) , # Giorno del mese
+         lag1 = lag(PM10, 1),
+         lag2 = lag(PM10, 2)
+         )  %>% left_join(df_giornaliero, by=("DatetimeBegin")) %>% dplyr::select(-DatetimeBegin)  %>%  drop_na()
+   
+   #serviranno una volta predetti i valori
+    #dati unsee per prediction
+   test_data <- dati_completis %>% slice(missing_indices)  %>% dplyr::select(-PM10) #mutate(PM10 = NA)
+   #dai per train
+   train_data <- dati_completis %>% slice(-missing_indices)
+   #valori da usare per calcolo metriche 
+  real_values <- dati_completis%>% slice(missing_indices) %>% dplyr::pull(PM10)
+  
+  
+set.seed(123)
+#Il dataset viene suddiviso in K fold
+folds <- createFolds(train_data$PM10, k = 5, list= F)
+# standardizziazione (mean=0 e sd=1). [-3,3]
+preprocess_paramss <- preProcess(
+  train_data %>% dplyr::select(-c(PM10, day_of_year,year,month,day_of_month, season)),  # Escludi anche day_of_year
+  method = c("center", "scale")
+)
+train_data<- predict(preprocess_paramss, train_data)
+# nuovi valori da testare
+test_data <- predict(preprocess_paramss, test_data) %>% as.matrix()
+
+
+train_data$folds <- folds  #aggiungiamo colonna folds al train_data
+
+final_model_path <- "best_epoch_model.keras"
+
+
+
+#Cross-validation (K-Fold)
+#Il fold corrente (20%) è usato per la validazione mentre  i restanti 4 fold (80%) sono usati per l'addestramento.
+  for(f in unique(train_data$folds)){ 
+     cat("\n Fold: ", f)
+    training_set <- train_data[train_data$folds != f, ] #seleziona tutte le righe che non appartengono a quel fold
+    validation_set <- train_data[train_data$folds == f, ]
+    
+    # Controllo dimensioni dei set
+  cat("\nDimensioni training_set:", nrow(training_set), "righe\n")
+  cat("Dimensioni validation_set:", nrow(validation_set), "righe\n")
+  
+  
+    x_train <- as.matrix(training_set %>% dplyr::select(-PM10, -folds)) #eliminiamo fold e variabile target
+    y_train <- as.matrix(training_set$PM10) 
+
+    x_valid <- as.matrix(validation_set %>% dplyr::select(-PM10, -folds))
+    y_valid <- as.matrix(validation_set$PM10)
+    
+   
+    #definitio of the model
+model <- keras3::keras_model_sequential() |>
+  keras3::layer_dense(units = 256, activation = "relu", input_shape = ncol(x_train )) |>
+  keras3::layer_batch_normalization() |>
+ # keras3::layer_dropout(rate = 0.3) |>
+  keras3::layer_dense(units = 128, activation = "relu", kernel_regularizer = keras3::regularizer_l2(0.001)) |>
+  keras3::layer_batch_normalization() |>
+  keras3::layer_dropout(rate = 0.2) |>
+  keras3::layer_dense(units = 64, activation = "relu", kernel_regularizer = keras3::regularizer_l2(0.001)) |>
+  keras3::layer_batch_normalization() |>
+  keras3::layer_dropout(rate = 0.2) |>
+  keras3::layer_dense(units = 64, activation = "relu", kernel_regularizer = keras3::regularizer_l2(0.001)) |>
+  keras3::layer_dense(units = 1) # Output per regressione
+
+
+#non uso softmax in quanto non si tratta di un problema di classficazione multicplaase ma semplice regressione e dobbiamo prevedere solo un valore continuo
+
+model %>% keras3::compile(
+  optimizer = keras3::optimizer_adam(learning_rate = 0.0001),  #keras::optimizer_adam()  #keras::optimizer_sgd(learning_rate = 0.01, momentum = 0.9) #_rmsprop
+  loss = 'mse',  #Adam combina i vantaggi di due ottimizzatori: AdaGrad e RMSProp
+  metrics = c('mae')
+)
+
+ # Se siamo sull'ultimo fold, salva il modello migliore
+  callbacks <- if (f == max(train_data$folds)) {
+    list(
+      callback_model_checkpoint(filepath = final_model_path, save_best_only = TRUE, monitor = "val_loss")
+    )
+  } else {
+    NULL
+  }
+history <- keras3::fit(
+  model,
+  x = x_train,          # Input (dati di training)
+  y = y_train, 
+  validation_data = list(x_valid, y_valid),  # Target (valori da predire)
+  epochs = 65,           # Numero di epoche
+  batch_size = 16,
+  callbacks = callbacks,
+  verbose = 0# Dimensione del batch
+  
+) 
+  # Valutazione del Fold
+  cat("\nVal_loss minimo del fold corrente:", min(history$metrics$val_loss), "\n")
+   
+
+  }
+ 
+  #carico pesi best model  
+ best_model <- keras3::load_model(final_model_path )   
+ #predizione su unseen data
+ predictions <- best_model %>% predict(test_data)  
+ 
+#calcolo mae per confronto con altri modelli
+ mae <- mean(abs(real_values - predictions), na.rm = TRUE)
+ rmse <- sqrt(mean((real_values - predictions)^2, na.rm = TRUE))
+ r2 <- cor(real_values, predictions, use = "complete.obs")^2
+
+ return(list(
+    model = model,  # struttura modello
+    predictions = predictions,  # Valori imputati
+    metrics = data.frame(MAE = mae, RMSE = rmse, R2 = r2),  # Metriche
+    plot= plot(history) # Storico dell'addestramento
+  ))
+}
+  
+
+  
+```
+
+
+
+
+
+
+
+
+```{r}
+results <- mlp_model(benchmark_5_completo, missing_indices )
+```
+
+```{r}
+results$metrics
+```
+
+```{r}
+results$plot
+```
+
+
+
+```{r}
+results$model
+```
+
+```{r}
+library(ggplot2)
+ggplot(data.frame(real = real_values, pred = predictions), aes(x = real, y = pred)) +
+  geom_point() + geom_abline(slope = 1, intercept = 0, color = "red") +
+  theme_minimal()
+```
+
+
+
+
+
+
+
+```{r}
+#remove.packages("keras")
+#install.packages("keras3") # or remotes::install_github("rstudio/keras")
+#keras3::install_keras()
+```
+
+
+
+```{r}
+library(randomForest)
+rf_model <- randomForest(PM10 ~ ., data = train_data, importance = TRUE)
+importance(rf_model) %>% as.data.frame() %>% arrange(desc(IncNodePurity))
+```
+
+%IncMSE indica quanto l'errore quadratico medio (MSE) aumenta quando la variabile predittiva in questione viene rimossa dal modello. Un valore più alto implica che la variabile è molto importante per la previsione di PM10.Le variabili lag1 e lag2 sono le più importanti, suggerendo che i valori ritardati di PM10 sono fortemente predittivi dei valori attuali.
+
+IncNodePurity Rappresenta il contributo di ogni variabile alla purezza dei nodi (riduzione di varianza) nei diversi alberi della foresta. Valori più alti indicano un maggiore impatto nel ridurre l'impurità.Lag1 e Lag2: La forte importanza di queste variabili suggerisce che il 
+PM10 dipende molto dai suoi valori passati. Questo è comune per fenomeni temporali come l'inquinamento atmosferico.Temp e Rad sembrano influire significativamente. Questo potrebbe riflettere il ruolo della temperatura e dell'irraggiamento solare nei processi di dispersione o formazione delle particelle.
+L'inclusione delle stagioni e del giorno dell'anno ha migliorato la capacità predittiva del modello, evidenziando una componente stagionale.
+
+
+
+
+
+
+
+
+
+
+
+```{r}
+# 15---> 2% (45)      # 29---> 4% (87)     # 44---> 6% (132)  
+variability_factor <- abs(seasonal_arpa) / max(abs(seasonal_arpa))
+pm10_synthetic_arpa1 <- mean_arpa + seasonal_arpa + rnorm(length(seasonal_arpa), mean = 0, sd = 2) * variability_factor
+pm10_synthetic_arpa2 <- mean_arpa + seasonal_arpa + rnorm(length(seasonal_arpa), mean = 0, sd = 3) * variability_factor
+
+pm10_synthetic_arpa1 <- pm10_synthetic_arpa1[-length(pm10_synthetic_arpa1)] %>%
+  xts(order.by = seq(ymd("2022-01-01"), ymd("2023-12-31"), by = "day"))
+
+pm10_synthetic_arpa2 <- pm10_synthetic_arpa2[-length(pm10_synthetic_arpa2)] %>%
+  xts(order.by = seq(ymd("2022-01-01"), ymd("2023-12-31"), by = "day"))
+
+#originali 
+pm10_daily1 <- pm10_daily  %>% slice(-n())
+xts_pm_arpa  <- xts(pm10_daily1$PM10, order.by = pm10_daily1$DatetimeBegin) 
+```
+
+
+```{r}
+variability_factor <- abs(seasonal_sensori) / max(abs(seasonal_sensori))
+pm10_synthetic_sensori1 <- mean_sensori + seasonal_sensori + rnorm(length(seasonal_sensori), mean = 0, sd = 2) * variability_factor
+pm10_synthetic_sensori2 <- mean_sensori + seasonal_sensori + rnorm(length(seasonal_sensori), mean = 0, sd = 3) * variability_factor
+pm10_synthetic_sensori3 <- mean_sensori + seasonal_sensori + rnorm(length(seasonal_sensori), mean = 0, sd = 4) * variability_factor
+
+
+pm10_synthetic_sensori1 <-  pm10_synthetic_sensori1[-length(pm10_synthetic_sensori1)] %>% xts(pm10_synthetic_sensori, order.by = seq(ymd("2022-01-01"), ymd("2023-12-31"), by = "day"))
+pm10_synthetic_sensori2 <- pm10_synthetic_sensori2[-length(pm10_synthetic_sensori2)] %>% xts(pm10_synthetic_sensori2, order.by = seq(ymd("2022-01-01"), ymd("2023-12-31"), by = "day"))
+pm10_synthetic_sensori3 <- pm10_synthetic_sensori3[-length(pm10_synthetic_sensori3)] %>% xts(pm10_synthetic_sensori3, order.by = seq(ymd("2022-01-01"), ymd("2023-12-31"), by = "day"))
+airpm_daily1 <- airpm_daily  %>% slice(-n())
+xts_pm_sensori <- xts(airpm_daily1$PM10, order.by = airpm_daily1$DatetimeBegin)
+```
+
+
+
+
+
+
+
+
+
+
+```{r}
+missing_value_reali<- which(is.na(complete_dataset$PM10))
+```
+
+
+
+
+##creazione dataset 
+
+df solo arpa
+
+
+
+
+```{r}
+df_wide <- air_sensor %>% dplyr::select(sensor_id,DatetimeBegin, PM10) %>%
+     pivot_wider(
+    names_from = sensor_id,
+    values_from = PM10)
+df_longs_stations <- df_wide %>%
+  pivot_longer(
+    cols = -DatetimeBegin,  # Tutte le colonne tranne DatetimeBegin
+    names_to = "Station",   # Nome della colonna per le stazioni
+    values_to = "PM10"      # Nome della colonna per i valori di PM10
+  )
+df_longs <- df_longs_stations %>% dplyr::select(- .data$Station)
+
+```
+
+
+
+```{r}
+df_wide <- df %>% dplyr::select(AirQualityStationName,DatetimeBegin, PM10) %>%
+     pivot_wider(
+    names_from = AirQualityStationName,
+    values_from = PM10)
+
+df_longs_stations <- df_wide %>%
+  pivot_longer(
+    cols = -DatetimeBegin,  # Tutte le colonne tranne DatetimeBegin
+    names_to = "Station",   # Nome della colonna per le stazioni
+    values_to = "PM10"      # Nome della colonna per i valori di PM10
+  )
+df_longs <- df_longs_stations %>% dplyr::select(- .data$Station)
+
+```
+
+
+```{r}
+
+synthetic_xts_list <- list( pm10_synthetic_arpa1)
+
+ complete_datasets <- lapply(c(list(xts_pm_arpa), synthetic_xts_list), function(xts_data) {
+    xts_data %>%
+      as.data.frame(row.names = NULL) %>%
+      mutate(DatetimeBegin = index(xts_data), Station = "1"  ) %>%
+      rename(PM10 = V1)
+  }) 
+  complete_dataset <- bind_rows(complete_datasets, df_longs_stations) %>%
+    mutate(DatetimeBegin = as.Date(DatetimeBegin))
+  
+```
+
+
+
+
+```{r}
+synthetic_xts_list <- list(pm10_synthetic_sensori1, pm10_synthetic_sensori2)
+
+
+
+complete_datasets <- lapply(c(list(xts_pm_sensori), synthetic_xts_list), function(xts_data) {
+    xts_data %>%
+      as.data.frame(row.names = NULL) %>%
+      mutate(DatetimeBegin = index(xts_data), Station = "1"  ) %>%
+      rename(PM10 = V1)
+  }) 
+  complete_dataset <- bind_rows(complete_datasets, df_longs_stations) %>%
+    mutate(DatetimeBegin = as.Date(DatetimeBegin))
+```
+
+
+```{r}
+print(nrow(df_longs))
+print(nrow(complete_dataset))
+
+((7293-5103)/5103)*100
+
+#[1] 2920
+#[1] 4380
+#[1] 50
+```
+
+
+```{r}
+library(imputeTS)
+```
+
+
+ 
+
+```{r}
+  
+ lags <-  complete_dataset  %>%
+  group_by(DatetimeBegin = as.Date(DatetimeBegin)) %>%  # Raggruppa per giorno
+  summarize(
+    PM10 = mean(PM10, na.rm = TRUE)  # Calcola la media giornaliera di PM10
+  ) %>%
+  mutate(
+    lag1 = lag(PM10, 1),  # Calcola il lag di 1 giorno
+    lag2 = lag(PM10, 2)   # Calcola il lag di 2 giorni
+  ) %>%
+  ungroup() %>% dplyr::select("DatetimeBegin","lag1" , "lag2" )
+  lags <- lags %>%
+    mutate(
+      lag1 = na_kalman(lag1), # Imputa lag1
+      lag2 = na_kalman(lag2)  # Imputa lag2
+    )
+dati_completi <- complete_dataset %>%
+  mutate(day_of_year = yday(DatetimeBegin),
+         year = year(DatetimeBegin),  # Estrae l'anno
+          month = month(DatetimeBegin),
+        season = sapply(DatetimeBegin, assegna_stagione),# stagione
+          day_of_month = day(DatetimeBegin)) %>%
+  mutate(DatetimeBegin = as.Date(DatetimeBegin)) %>% # Converti DatetimeBegin a Date
+ left_join(lags, by = "DatetimeBegin") %>%      # Primo join
+  left_join(df_giornaliero, by = "DatetimeBegin") %>% # Secondo join
+  #dplyr::filter(!is.na(lag1) & !is.na(lag2)) %>%
+  #dplyr::select(-DatetimeBegin)   %>%
+  mutate(index_original = row_number())
+        
+```
+
+
+
+```{r}
+colSums(is.na(dati_completi))
+```
+
+
+
+
+```{r}
+## Trova gli indici dei valori mancanti in PM10
+missing_indices <- which(is.na(dati_completi$PM10)) 
+test_data <- dati_completi %>%
+  filter(index_original %in% missing_indices)  %>% dplyr::select(-Station,-DatetimeBegin) 
+train_data <- dati_completi %>%
+  filter(!index_original %in% missing_indices) %>% dplyr::filter(!is.na(lag1) & !is.na(lag2))  %>% dplyr::select(-Station, -index_original, -DatetimeBegin) 
+```
+
+
+
+
+
+
+
+```{r}
+ cl <- makeCluster(detectCores() - 1) # Usa tutti i core meno uno
+  registerDoParallel(cl)
+  on.exit(stopCluster(cl))
+control <- trainControl(method='repeatedcv', #"cv"
+                        number=5, 
+                        repeats=3,
+                        search= "grid") #g
+
+
+# Configurazione di tuneGrid per caret
+tunegrid <- expand.grid(mtry = 10) # Valore fisso per mtry
+
+# Addestramento del modello Random Forest con caret
+rf_model <- train(PM10 ~ ., 
+  data = train_data,  # Escludi l'indice
+  method = "rf", 
+  metric = "RMSE", 
+  trControl = control,
+  tuneGrid = tunegrid,
+  ntree = 500 # Fissa il numero di alberi a 500
+)
+
+```
+
+```{r}
+missing_indices
+```
+
+
+
+
+```{r}
+#test_data <- dati_completi %>%
+#  filter(index_original %in% missing_indices) %>% dplyr::select(-Station) 
+predictions <- test_data %>%
+  mutate(PM10_predicted = predict(rf_model, newdata = .))
+```
+
+
+```{r}
+complete_datasetss <- dati_completi  %>%
+  left_join(test_data %>% select(index_original, PM10_predicted), by = "index_original") %>%
+  mutate(PM10 = ifelse(is.na(PM10), PM10_predicted, PM10),
+          imputato = ifelse(is.na(PM10), 1, 0) ) %>%
+  dplyr::select(PM10, imputato, Station) %>% dplyr::filter(Station != 1)
+```
+
+
+
+
+
+
+```{r}
+tree_model_final <- function(dati_completi) {
+  
+   cl <- makeCluster(detectCores() - 1) # Usa tutti i core meno uno
+  registerDoParallel(cl)
+  on.exit(stopCluster(cl))
+  
+ lags <-  dati_completi  %>%
+  group_by(DatetimeBegin = as.Date(DatetimeBegin)) %>%  # Raggruppa per giorno
+  summarize(
+    PM10 = mean(PM10, na.rm = TRUE)  # Calcola la media giornaliera di PM10
+  ) %>%
+  mutate(
+    lag1 = lag(PM10, 1),  # Calcola il lag di 1 giorno
+    lag2 = lag(PM10, 2)   # Calcola il lag di 2 giorni
+  ) %>%
+  ungroup() %>% dplyr::select("DatetimeBegin","lag1" , "lag2" )
+
+dati_completi <- dati_completi %>%
+  mutate(day_of_year = yday(DatetimeBegin),
+         year = year(DatetimeBegin),  # Estrae l'anno
+          month = month(DatetimeBegin),
+        season = sapply(DatetimeBegin, assegna_stagione),# stagione
+          day_of_month = day(DatetimeBegin)) %>%
+  mutate(DatetimeBegin = as.Date(DatetimeBegin)) %>% # Converti DatetimeBegin a Date
+ left_join(lags, by = "DatetimeBegin") %>%      # Primo join
+  left_join(df_giornaliero, by = "DatetimeBegin") %>% # Secondo join
+  mutate(index_original = row_number())
+   
+ missing_indices <- which(is.na(dati_completi$PM10)) 
+ test_data <- dati_completi %>%
+  filter(index_original %in% missing_indices)  %>% dplyr::select(-Station,-DatetimeBegin) 
+ 
+ test_data <- test_data %>%
+    mutate(
+      lag1 = na_kalman(lag1), # Imputa lag1
+      lag2 = na_kalman(lag2)  # Imputa lag2
+    )
+train_data <- dati_completi %>%
+  filter(!index_original %in% missing_indices) %>% dplyr::filter(!is.na(lag1) & !is.na(lag2))  %>% dplyr::select(-Station, -index_original, -DatetimeBegin) 
+
+
+   #print(colSums(is.na(train_data)))
+  
+cat("numero righe train", nrow(train_data))
+cat("numero righe test", nrow(test_data))
+set.seed(12445)
+
+# Define the model using caret's train function
+control <- trainControl(method='repeatedcv', #"cv"
+                        number=5, 
+                        repeats=3,
+                        search= "grid") #g
+
+
+set.seed(123)
+#Number randomely variable selected is mtry
+
+##create tunegrid with 15 values from 1:15 for mtry to tunning model. 
+tunegrid <- expand.grid(mtry = (1:15))   #definisce il numero di variabili indipendenti considerate in ogni split di un albero.
+
+modellist <- list()
+for (ntree in  c(50, 100, 150,300,500)) {
+set.seed(123)
+fit <- train(PM10~., 
+                      data=train_data, 
+                      method='rf', 
+                      metric= "RMSE", 
+                      tuneGrid=tunegrid, 
+                      trControl=control,
+                      ntree = ntree) 
+	key <- toString(ntree)
+	modellist[[key]] <- fit
+}
+
+# compare results
+results <- resamples(modellist)
+ # Miglior modello
+str(modellist[[1]]$results)
+
+bestModel <- modellist[[which.min(sapply(modellist, function(model)
+  mean(model$results$RMSE)))]]
+cat("n alberi best modello", names(which.min(sapply(modellist, function(x) min(x$results$RMSE)))), "\n")
+
+
+
+
+# Previsione sui dati incompleti
+predictions <- test_data %>% mutate(PM10_predicted = predict(bestModel, newdata = .)) 
+
+dataset_imputato <- dati_completi  %>%
+  left_join(predictions %>% select(index_original, PM10_predicted), by = "index_original") %>%
+  mutate(
+    imputato = ifelse(is.na(PM10), 1, 0) ,
+    PM10 = ifelse(is.na(PM10), PM10_predicted, PM10)) %>%
+  dplyr::select(PM10, imputato, Station,DatetimeBegin) %>% dplyr::filter(Station != 1)
+ return(list(
+    results = summary(results),
+     best_model = bestModel,
+    predictions = predictions,
+    dataset_imputato = dataset_imputato
+  ))
+#Valutazione dell'Approccio di Imputazione Bi-Direzionale:
+}
+```
+
+
+
+```{r}
+results <- tree_model_final(complete_dataset)
+```
+
+```{r}
+results$predictions
+```
+
+```{r}
+dataset<- results$dataset_imputato
+```
+
+
+```{r}
+write.csv(dataset, "C:/Users/samir/Downloads/dati_tesi/dataset_sensori_imputato.csv", row.names = FALSE)
+```
+
+
+```{r}
+ok <-results$best_model
+```
+
+```{r}
+
+```
+
+
+```{r}
+ lags <-  complete_dataset %>%
+  group_by(DatetimeBegin = as.Date(DatetimeBegin)) %>%  # Raggruppa per giorno
+  summarize(
+    PM10 = mean(PM10, na.rm = TRUE)  # Calcola la media giornaliera di PM10
+  ) %>%
+  mutate(
+    lag1 = lag(PM10, 1),  # Calcola il lag di 1 giorno
+    lag2 = lag(PM10, 2)   # Calcola il lag di 2 giorni
+  ) %>%
+  ungroup() %>% dplyr::select("DatetimeBegin","lag1" , "lag2" )
+
+dati_completi <- complete_dataset %>%
+  arrange(DatetimeBegin) %>%  # Ordina in ordine crescente
+  mutate(day_of_year = yday(DatetimeBegin),
+         year = year(DatetimeBegin),  # Estrae l'anno
+          month = month(DatetimeBegin),
+        season = sapply(DatetimeBegin, assegna_stagione),# stagione
+          day_of_month = day(DatetimeBegin)) %>%
+  mutate(DatetimeBegin = as.Date(DatetimeBegin)) %>% # Converti DatetimeBegin a Date
+  left_join(lags, by = "DatetimeBegin") %>%      # Primo join
+  left_join(df_giornaliero, by = "DatetimeBegin") %>% # Secondo join
+  dplyr::filter(!is.na(lag1) & !is.na(lag2)) %>%
+  dplyr::select(-DatetimeBegin)
+
+```
+
+
+
+```{r}
+test_data <- dati_completi %>% slice(missing_indices) %>% mutate(PM10 = NA)
+train_data <- dati_completi %>% slice(-missing_indices)
+```
+
+
+```{r}
+control <- trainControl(method='repeatedcv', #"cv"
+                        number=5, 
+                        repeats=3,
+                        search= "grid") #g
+
+
+set.seed(123)
+#Number randomely variable selected is mtry
+
+##create tunegrid with 15 values from 1:15 for mtry to tunning model. 
+tunegrid <- expand.grid(mtry = (1:15))   #definisce il numero di variabili indipendenti considerate in ogni split di un albero.
+
+
+set.seed(123)
+fit <- train(PM10~., 
+                      data=train_data, 
+                      method='rf', 
+                      metric= "RMSE", 
+                      tuneGrid=tunegrid, 
+                      trControl=control) 
+
+```
+
+
+
+
+```{r}
+dati_completi <- benchmark_5_completo %>% 
+  mutate(day_of_year = yday(DatetimeBegin),
+          year = year(DatetimeBegin),  # Estrae l'anno
+          month = month(DatetimeBegin),
+        season = sapply(DatetimeBegin, assegna_stagione),# stagione
+          day_of_month = day(DatetimeBegin),
+         lag1 = lag(PM10, 1),
+         lag2 = lag(PM10, 2)
+         )  %>% left_join(df_giornaliero, by=("DatetimeBegin")) %>% dplyr::select(-DatetimeBegin)  #%>%  drop_na()
+   
+   #serviranno una volta predetti i valori
+  
+test_data <- dati_completi
+
+# Assegna NA alla colonna PM10 per gli indici specificati in missing_indices
+test_data$PM10[missing_indices] <- NA
+   #print(colSums(is.na(train_data)))
+  real_values <- dati_completi%>% slice(missing_indices) %>% dplyr::pull(PM10)
+```
+
+```{r}
+nrow(dati_completi)
+nrow(test_data)
+
+```
+
+
+
+
+
+
+```{r}
+sapply(test_data, function(x) sum(is.na(x)))
+```
+```{r}
+#method rappresenta il metodo di imputazione
+#"" significa che per quella variaible non deve essere imputata
+method <- rep("", ncol(test_data))
+method[which(colnames(test_data) == "PM10")] <- "pmm" 
+```
+
+
+```{r}
+method
+```
+```{r}
+imp <- mice(test_data, method = method, m = 5, maxit = 10)
+```
+
+
+
+
+## Mice
+
+
+In MICE, i valori mancanti di una variabile (come PM10) vengono imputati utilizzando le altre variabili disponibili e i valori osservati (non mancanti) della variabile target.
+
+```{r}
+install.packages("mice")
+```
+
+
+```{r}
+library(mice)
+```
+
+
+```{r}
+# 15---> 2% (45)      # 29---> 4% (87)     # 44---> 6% (132)    # ---> 8% (175)     # 44---> 2% (219)
+#synthetic_xts_list <- list(pm10_synthetic_arpa1, pm10_synthetic_arpa2)
+
+#missing_configs <- list(
+#  list(missing = 15, gaps = c(3, 2)),  # Configurazione per la serie originale
+#  list(missing = 10, gaps = c(2, 2)),  # Configurazione per synthetic_arpa1
+ # list(missing = 20, gaps = c(6, 2, 2))) # Configurazione per synthetic_arpa2
+
+
+#datasets <- generate_datasets(xts_pm_arpa, synthetic_xts_list, missing_configs)
+
+# 29---> 4% (87)     
+#synthetic_xts_list <- list(pm10_synthetic_arpa1, pm10_synthetic_arpa2)
+
+#missing_configs <- list(
+#  list(missing = 30, gaps = c(3, 2,5,3,2)),  # Configurazione per la serie originale
+#  list(missing = 25, gaps = c(2, 2,2,2,3,7,4)),  # Configurazione per synthetic_arpa1
+#  list(missing = 32, gaps = c(6, 2, 2,2,4))) # Configurazione per synthetic_arpa2
+#datasets <- generate_datasets(xts_pm_arpa, synthetic_xts_list, missing_configs)
+
+
+# 44---> 6% (132)  
+#synthetic_xts_list <- list(pm10_synthetic_arpa1, pm10_synthetic_arpa2)
+
+#missing_configs <- list(
+  #list(missing = 40, gaps = c(3, 2,9,3,2,2,2)),  # Configurazione per la serie originale
+  #list(missing = 50, gaps = c(2, 2,2,2,3,3,4,2,2)),  # Configurazione per synthetic_arpa1
+  #list(missing = 42, gaps = c(6, 2, 2,2,2,2)))  # Configurazione per synthetic_arpa2
+#datasets <- generate_datasets(xts_pm_arpa, synthetic_xts_list, missing_configs)
+
+# 44---> 8% (175)  
+#synthetic_xts_list <- list(pm10_synthetic_arpa1, pm10_synthetic_arpa2)
+
+#missing_configs <- list(
+  #list(missing = 50, gaps = c(3, 2,6,3,2,2,2,3,2,2)),  # Configurazione per la serie originale
+  #list(missing = 65, gaps = c(2, 2,2,2,3,3,4,2,2,8,6,3)),  # Configurazione per synthetic_arpa1
+  #list(missing = 60, gaps = c(6, 2, 2,2,2,2,3,5,3,2)))  # Configurazione per synthetic_arpa2
+#datasets <- generate_datasets(xts_pm_arpa, synthetic_xts_list, missing_configs)
+
+
+# 44---> 10% (219)  
+#synthetic_xts_list <- list(pm10_synthetic_arpa1, pm10_synthetic_arpa2)
+
+#missing_configs <- list(
+  #list(missing = 68, gaps = c(3, 2,6,3,2,2,2,3,2,2)),  # Configurazione per la serie originale
+  #list(missing = 77, gaps = c(2, 2,2,2,3,3,4,2,2,8,6,3)),  # Configurazione per synthetic_arpa1
+  #list(missing = 74, gaps = c(6, 2, 2,2,2,2,3,5,3,2,4,6)))  # Configurazione per synthetic_arpa2
+#datasets <- generate_datasets(xts_pm_arpa, synthetic_xts_list, missing_configs)
+
+
+```
+
+cart: Classification and Regression Trees
+polyreg:Regressione logistica multinomiale per variabili categoriali con molte categorie. È non parametrico per natura
+
+
+```{r}
+# 44---> 2% (219)
+synthetic_xts_list <- list(pm10_synthetic_arpa1, pm10_synthetic_arpa2)
+
+missing_configs <- list(
+  list(missing = 15, gaps = c(3, 2)),  # Configurazione per la serie originale
+  list(missing = 10, gaps = c(2, 2)),  # Configurazione per synthetic_arpa1
+  list(missing = 20, gaps = c(6, 2, 2))) # Configurazione per synthetic_arpa2
+
+
+datasets <- generate_datasets(xts_pm_arpa, synthetic_xts_list, missing_configs)
+
+```
+
+
+
+```{r}
+benchmark_5_completo <- datasets $completo
+missing_indices <- datasets $missing_indices
+```
+
+```{r}
+library(mice)
+```
+
+
+```{r}
+mice_imputation <- function(dati_completi, missing_indices,  mice_method= NULL) {
+
+ dati_completi <- dati_completi %>% 
+  mutate(day_of_year = yday(DatetimeBegin),
+          year = year(DatetimeBegin),  # Estrae l'anno
+          month = month(DatetimeBegin),
+        season = sapply(DatetimeBegin, assegna_stagione),# stagione
+          day_of_month = day(DatetimeBegin),
+         lag1 = lag(PM10, 1),
+         lag2 = lag(PM10, 2)
+         )  %>% left_join(df_giornaliero, by=("DatetimeBegin")) %>% dplyr::select(-DatetimeBegin)  
+
+
+ dati_completi <- dati_completi %>%
+    mutate(
+      lag1 = na_kalman(lag1), # Imputa lag1
+      lag2 = na_kalman(lag2)  # Imputa lag2
+    )
+
+test_data <- dati_completi
+
+# Assegna NA alla colonna PM10 per gli indici specificati in missing_indices
+test_data$PM10[missing_indices] <- NA
+   #print(colSums(is.na(train_data)))
+real_values <- dati_completi%>% slice(missing_indices) %>% dplyr::pull(PM10)
+
+method <- rep("", ncol(test_data))
+method[which(colnames(test_data) == "PM10")] <-  mice_method
+
+#per ogni iterazione (da 1 a 10), vengono aggiornati tutti i valori mancanti per PM10 in ciascuno dei 5 dataset (default) imputati.
+imp <- mice(test_data, method = method, m = 5, maxit = 30, seed=2525, printFlag=FALSE,  print = FALSE) # Esegue fino a 10 iterazioni per raggiungere la convergenza
+#imputed_data <- complete(imp)  
+#is 30% missing data on average in a dataset, use 30 imputations - see Bodner (2008) and White et al (2011) for further details.
+
+  # Calcolo delle metriche su tutte le imputazioni
+  metrics_list <- lapply(1:imp$m, function(i) {
+    imputed_data <- complete(imp, i)
+    mae <- mean(abs(real_values - imputed_data$PM10[missing_indices]), na.rm = TRUE)
+    rmse <- sqrt(mean((real_values - imputed_data$PM10[missing_indices])^2, na.rm = TRUE))
+    r2 <- cor(real_values, imputed_data$PM10[missing_indices], use = "complete.obs")^2
+    data.frame(RMSE = rmse, MAE = mae,  R2 = r2)
+  })
+  
+  # Media delle metriche
+  metrics <- do.call(rbind, metrics_list)
+  mean_metrics <- colMeans(metrics)
+  
+  # Risultati
+  return(list(
+    imp = imp,
+    mean_metrics = mean_metrics,
+    all_metrics = metrics,
+    imp_plot = plot(imp)
+  ))
+}
+
+```
+
+
+
+
+```{r}
+ok <- mice_imputation(benchmark_5_completo, missing_indices, mice_method = "cart") #midastouch
+```
+
+
+
+```{r}
+ok <- mice_imputation(benchmark_5_completo, missing_indices, mice_method = "mean") #midastouch
+```
+
+
+```{r}
+ok$mean_metrics
+```
+
+
+
+```{r}
+#Le linee rappresentano i 5 dataset imputati.Se le linee fluttuano continuamente anche verso la fine delle iterazioni, significa che non è stata raggiunta la convergenza. 
+ok$imp_plot
+```
+Le linee oscillano leggermente attorno a valori simili (tra 30 e 33), senza grandi cambiamenti significativi nelle iterazioni.
+
+
+method = "rf"
+method = "cart"
+pmm
+
+```{r}
+#Questo grafico confronta i valori osservati e imputati. I punti blu rappresentano i valori osservati, mentre i punti rossi rappresentano i valori imputati.
+stripplot(ok$imp, PM10, pch = 20, cex = 1.2)
+```
+I valori imputati sembrano distribuiti in modo plausibile rispetto ai valori osservati. Non ci sono pattern evidenti di bias o valori estremi eccessivi tra imputati e osservati.
+
+
+```{r}
+xyplot(ok$imp, PM10 ~ Temp | .imp, pch = 20, cex = 1.2)
+```
+
+
+```{r}
+#Il grafico a boxplot confronta i valori imputati nei diversi dataset
+bwplot(ok$imp, PM10 ~ .imp)
+```
+
+
+
+```{r}
+#Il density plot confronta le distribuzioni marginali dei valori osservati e imputati.
+densityplot(ok$imp, ~ PM10)
+```
+
+
+
+
+
+
+```{r}
+kalman_imputation <- function(dati_completi, missing_indices, inputeTS_method= NULL) {
+  
+  # Creazione di nuove feature temporali e lag
+  dati_completi <- dati_completi %>% 
+    mutate(
+      day_of_year = yday(DatetimeBegin),
+      year = year(DatetimeBegin),  
+      month = month(DatetimeBegin),
+      season = sapply(DatetimeBegin, assegna_stagione),  # Assegna stagione
+      day_of_month = day(DatetimeBegin),
+      lag1 = lag(PM10, 1),
+      lag2 = lag(PM10, 2)
+    ) %>%
+    left_join(df_giornaliero, by = "DatetimeBegin") %>%
+    dplyr::select(-DatetimeBegin)
+
+  # Imputazione dei lag con Kalman Filter
+  dati_completi <- dati_completi %>%
+    mutate(
+      lag1 = na_kalman(lag1), 
+      lag2 = na_kalman(lag2)
+    )
+
+  test_data <- dati_completi
+
+  # Introduce NA nei punti specificati per PM10
+  test_data$PM10[missing_indices] <- NA
+
+  # Valori reali da confrontare dopo l'imputazione
+  real_values <- dati_completi %>% slice(missing_indices) %>% dplyr::pull(PM10)
+
+  # **Imputazione con Kalman Filter**
+  if (inputeTS_method == "kalman") {
+    
+    test_data$PM10 <- na_kalman(test_data$PM10)
+  } else if  (inputeTS_method == "spline"){
+    test_data$PM10 <-  na_locf(test_data$PM10)
+  }
+    
+  
+  # **Calcolo delle metriche di valutazione**
+  mae <- mean(abs(real_values - test_data$PM10[missing_indices]), na.rm = TRUE)
+  rmse <- sqrt(mean((real_values - test_data$PM10[missing_indices])^2, na.rm = TRUE))
+  r2 <- cor(real_values, test_data$PM10[missing_indices], use = "complete.obs")^2
+
+  # Risultati
+  return(list(
+    imputed_data = test_data,
+    mean_metrics = data.frame(RMSE = rmse, MAE = mae, R2 = r2)
+  ))
+}
+
+```
+
+
+
+
+```{r}
+result_kalman <- kalman_imputation(benchmark_5_completo, missing_indices,inputeTS_method ="kalman")
+```
+
+
+```{r}
+result_kalman$mean_metrics
+```
+
+```{r}
+result_kalman <- kalman_imputation(benchmark_5_completo, missing_indices,inputeTS_method ="spline")
+```
+
+
+```{r}
+result_kalman$mean_metrics
+```
+
+
+
+
+```{r}
+xgboost_model <- function(dati_completi, missing_indices) {
+  
+  
+  
+  dati_completi <- dati_completi %>% 
+  mutate(day_of_year = yday(DatetimeBegin),
+          year = year(DatetimeBegin),  # Estrae l'anno
+          month = month(DatetimeBegin),
+        season = sapply(DatetimeBegin, assegna_stagione),#stagione
+         lag1 = lag(PM10, 1), # lag1 = na_kalman(lag(PM10, 1), model = "StructTS"),
+         lag2 = lag(PM10, 2), #lag2 = na_kalman(lag(PM10, 2), model = "StructTS"),
+          day_of_month = day(DatetimeBegin),
+         )  %>% left_join(df_giornaliero, by=("DatetimeBegin")) %>% dplyr::select(-DatetimeBegin)  %>%  drop_na()
+   
+  
+   test_data <- dati_completi %>% slice(missing_indices) %>% mutate(PM10 = NA)
+   train_data <- dati_completi %>% slice(-missing_indices)
+   #print(colSums(is.na(train_data)))
+  real_values <- dati_completi%>% slice(missing_indices) %>% dplyr::pull(PM10)
+
+set.seed(12445)
+
+# Define the model using caret's train function
+control <- trainControl(method='repeatedcv', #"cv"
+                        number=5, 
+                        repeats=3,
+                        search= "grid") #g
+
+
+set.seed(123)
+#Number randomely variable selected is mtry
+
+##create tunegrid with 15 values from 1:15 for mtry to tunning model. 
+tune_grid <- expand.grid(nrounds = 200,
+                        max_depth = 5,
+                        eta = 0.05,
+                        gamma = 0.01,
+                        colsample_bytree = 0.75,
+                        min_child_weight = 0,
+                        subsample = 0.5)#definisce il numero di variabili indipendenti considerate in ogni split di un albero.
+
+modellist <- list()
+for (ntree in  c(50, 100, 150,300,500)) {
+set.seed(123)
+fit <- train(PM10~., 
+                      data=train_data, 
+                      method='xgbTree', 
+                      metric= "RMSE", 
+                      tuneGrid=tune_grid, 
+                      trControl=control,
+                      tuneLength = 10) 
+	key <- toString(ntree)
+	modellist[[key]] <- fit
+}
+
+# compare results
+results <- resamples(modellist)
+ # Miglior modello
+str(modellist[[1]]$results)
+
+bestModel <- modellist[[which.min(sapply(modellist, function(model)
+  mean(model$results$RMSE)))]]
+cat("n alberi best modello", names(which.min(sapply(modellist, function(x) min(x$results$RMSE)))), "\n")
+
+# Previsione sui dati incompleti
+predictions <- predict(bestModel, newdata = test_data)
+
+  # Valutazione: confronta i valori reali con le previsioni
+mae <- mean(abs(real_values - predictions), na.rm = TRUE)
+rmse <- sqrt(mean((real_values - predictions)^2, na.rm = TRUE))
+r2 <- cor(real_values, predictions, use = "complete.obs")^2
+
+
+ return(list(
+    results = summary(results),
+     best_model = bestModel,
+    predictions = predictions,
+    metrics = data.frame(MAE = mae, RMSE = rmse, R2 = r2)
+    
+  ))
+#Valutazione dell'Approccio di Imputazione Bi-Direzionale:
+}
+```
+
+
+```{r}
+results <- xgboost_model(benchmark_5_completo, missing_indices )
+```
+
+```{r}
+results$metrics
+```
+

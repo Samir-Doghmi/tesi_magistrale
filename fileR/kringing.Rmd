@@ -1,0 +1,4177 @@
+---
+title: "kringing"
+output: html_document
+date: "2025-01-20"
+---
+```{r}
+#install.packages("geoR")
+```
+
+```{r}
+library(spacetime)
+library(sp)
+```
+
+
+```{r}
+library(dplyr)
+library(gstat)
+library(sf)
+library(tidyverse)
+library(imputeTS)
+```
+
+
+
+
+
+
+
+```{r}
+df1 <- read_csv("C:/Users/samir/Downloads/dati_tesi/dataset_trainV.csv",show_col_types = FALSE, )  %>% dplyr::select(-ZoneType ,-StationType ,-Altitude, -Source, -unique_id, -Long, -Lat, -season) %>% mutate(date = as.Date(date)) %>%
+  rename(DatetimeBegin = date,
+         Station= StationName)
+df <- df %>% dplyr::select("DatetimeBegin", "Station","PM10", "lag1", "lag7","day_of_month","season","month","day_of_year","Lat","Long","ZoneType","StationType","Altitude","Source") %>%  left_join(df1, by= c("DatetimeBegin", "Station" ) )
+```
+
+
+
+```{r}
+df_land <- read_csv("C:/Users/samir/Downloads/dati_tesi/landcov_sums.csv",show_col_types = FALSE ) 
+df_land<- pivot_wider(df_land, names_from = landcov, values_from = total_sum, id_cols= StationName, values_fill= list(total_sum=0)) %>% rename(Station = StationName) 
+  
+```
+
+
+
+
+
+```{r}
+df <- read_csv("C:/Users/samir/Downloads/dati_tesi/df_totale.csv",show_col_types = FALSE ) %>%
+  dplyr::select(-"Continuous_urban_fabric" ,-"Discontinuous_urban_fabric" ,-"Industrial_or_commercial_units" ,-"Road_and_rail_networks_and_associated_land",-"Non-irrigated_arable_land" ,-"Green_urban_areas"   )  %>% left_join(df_land, by = "Station")  %>% rename (Continuous_urban_fabric= "Continuous urban fabric",
+            Discontinuous_urban_fabric ="Discontinuous urban fabric",
+            Industrial_commercial_units= "Industrial or commercial units",
+            Road_Rail = "Road and rail networks and associated land",
+            Non_irrigated_arable_land ="Non-irrigated arable land",
+            Green_urban_areas= "Green urban areas")
+```
+Trasformazione box-cox
+
+```{r}
+library(MASS)
+```
+
+```{r}
+mod <- df %>%
+  dplyr::select(-DatetimeBegin, -Station, -Long, -Altitude,-ZoneType, -Lat)
+boxcox <- boxcox(lm(PM10 ~ ., data = mod), lambda = seq(-2, 2, by = 0.1))
+lambda <- boxcox$x[which.max((boxcox$y))]
+#df$PM10a <- (df$PM10^lambda - 1)/ lambda 
+#df <- df %>% dplyr::select(-PM10) %>% rename(PM10= PM10a)%>%      
+#  dplyr::select(PM10, everything()) 
+
+```
+
+
+```{r}
+lambda 
+```
+
+
+
+
+
+
+
+
+
+
+
+```{r}
+# Load the shapefile directly from the downloaded local directory
+shapefile_path <- "C://Users/samir/Downloads/dati_tesi/confini_quartieri_milano/Quartieri_Milano.shp"
+# Read the shapefile
+milano <- st_read(shapefile_path)  %>% st_transform(crs = 3035)
+milano <- as(milano, "Spatial")
+```
+
+
+
+
+
+La libreria spacetime richiede che i dati siano in formato POSIXct.
+
+
+
+```{r}
+min(df$DatetimeBegin)
+```
+
+Gstat is able to perform spatio-temporal kriging exploiting the functionalities of the package spacetime, which was developed by the same team as gstat. In spacetime we have two ways to represent spatio-temporal data: STFDF and STIDF formats.
+lavoreremo con un STFDT (Spatio-Temporal Full Data Frame), che è progettato per dati regolari nello spazio e nel tempo, dato che le stazioni sono fisse e la loro posizione non cambia nel tempo e le misurazione giornaliere non mancano.
+
+
+```{r}
+df_wide <- df %>% dplyr::select(Station,DatetimeBegin, PM10) %>%
+     pivot_wider(
+    names_from = Station,
+    values_from = PM10)
+```
+
+```{r}
+colSums(is.na(df_wide))
+```
+
+
+2023-07-14
+Preparazione dei dati spaziali:
+
+La sequenza temporale è utilizzata per costruire il dominio temporale per l'oggetto STFDF.
+
+
+```{r}
+#class(df$DatetimeBegin)
+df$DatetimeBegin <- as.POSIXct(df$DatetimeBegin, format = "%Y-%m-%d")
+df <- df[order(df$Station, df$DatetimeBegin), ]
+# Crea oggetto SpatialPoints con CRS EPSG:4326 (lat/lon)
+stations <- unique(df[, c("Lat", "Long", "Station")])
+sp::coordinates(stations) <- ~ Long + Lat
+sp::proj4string(stations) <- sp::CRS("+init=epsg:4326")  # Sistema originale (lat/lon)
+
+# Trasforma in EPSG:3035 (proiezione metrica)
+stations <- sp::spTransform(stations, sp::CRS("+init=epsg:3035"))
+
+# Definisci la sequenza temporale
+time_seq <- seq(
+  from = as.POSIXct("2022-01-01"),
+  to = as.POSIXct("2023-12-31"),
+  by = "day"
+)
+
+# Crea il Data Frame con i valori di PM10
+values <- df[, c("Station", "DatetimeBegin", "PM10")]
+
+# Associa i dati spazio-temporali
+stfdf <- spacetime::STFDF(
+  sp = stations,  # Coordinate delle stazioni
+  time = time_seq,  # Sequenza temporale
+  data = data.frame(PM10 = values$PM10)  # Valori PM10
+)
+```
+At this point we need to perform a very important operation for kriging, which is check whether we have some duplicated points. It may happen sometime that there are points with identical coordinates. 
+
+
+```{r}
+stfdf
+```
+
+```{r}
+ acf(stfdf@data)
+```
+Questo indica che i valori di PM10 sono altamente correlati nel breve periodo. Il decadimento graduale dell'autocorrelazione suggerisce un processo temporale a memoria lunga.
+
+```{r}
+var(stfdf@data$PM10)
+```
+
+
+
+
+```{r}
+# Ottieni le date dall'oggetto `stfdf`
+#Un oggetto spaziotemporale della classe STFDF, che contiene informazioni spaziali (coordinate), temporali (date) e dati associati (es. PM10
+time_values <- index(stfdf@time)
+
+# Filtra gli indici corrispondenti al periodo desiderato
+selected_indices <- which(time_values >= as.POSIXct("2022-02-02") &
+                          time_values <= as.POSIXct("2022-02-08"))
+
+# Subset dell'oggetto `stfdf` utilizzando gli indici selezionati
+week_subset <- stfdf[, selected_indices]
+
+
+stplot(as(stfdf[,selected_indices],"STFDF"),
+        col.regions=bpy.colors(120)[-(1:20)],
+        sp.layout = list("sp.polygons", milano), scales=list(draw=F), 
+        key.space="right", colorkey=T, cuts=0:70,
+        main=NULL) 
+# xlim = bbox(milano)[1, ],
+#ylim = bbox(milano)[2, ],
+```
+Sì, la scala di colori rappresenta i valori di PM10 misurati nelle centraline nei rispettivi giorni indicati.
+Questo grafico rappresenta una visualizzazione spazio-temporale delle concentrazioni di PM10 osservate in diverse stazioni durante il periodo compreso tra il 1° e il 7° gennaio 2022. 
+
+
+
+```{r}
+# Ottieni le date dall'oggetto `stfdf`
+
+
+# Filtra gli indici corrispondenti al periodo desiderato
+selected_indices <- which(time_values >= as.POSIXct("2022-07-02") &
+                          time_values <= as.POSIXct("2022-07-09"))
+
+# Subset dell'oggetto `stfdf` utilizzando gli indici selezionati
+week_subset <- stfdf[, selected_indices]
+
+
+stplot(as(stfdf[,selected_indices],"STFDF"),
+        col.regions=bpy.colors(120)[-(1:20)],
+        sp.layout = list("sp.polygons", milano), scales=list(draw=F), 
+        key.space="right", colorkey=T, cuts=0:70,
+        main=NULL) 
+```
+
+```{r}
+stfdf@data$
+```
+
+
+
+La funzione variogramST serve per calcolare variogrammi spaziotemporali e combina la componente spaziale con quella temporale. A differenza del variogramma standard, tiene conto delle dipendenze sia nello spazio che nel tempo, calcolando le semivarianze a diverse distanze spaziali e temporali. la granularità dei dati ciene dedotta automaticamente dai dati.
+```{r}
+lambda <- 0.3838384
+stfdf@data$PM10_trans <- (stfdf@data$PM10^lambda - 1) / lambda
+#semivariogramma empirico
+st_variogram <- variogramST(
+  PM10_trans ~ 1,              # Formula
+  data = stfdf,          # Dati spaziotemporali
+  tlags = 0:6,           # Lag temporali (da 0 a 7 giorni)
+  cutoff = 4356.324,    #4356.324    # Massima distanza spaziale
+  width = 1000,           # Larghezza bin per lag spaziali,Questo raggruppa le coppie di punti con distanze spaziali simili 
+ # twidth = 1,            # Larghezza bin per lag temporali (es. 1 giorno) la semivarianza sara calcolata con lag temporale pari ad un giorno
+  assumeRegular = TRUE   # Assume intervalli temporali regolari
+)
+
+#As a thumb rule, the maximum distance for the variogram is taken as half of the maximum distance between two data points in the data set. Therefore, the maximum distance for the variogram for the present data should be 4km.
+
+
+```
+width the width of subsequent distance intervals into which data point pairs are grouped
+for semivariance estimates
+
+
+variogramST calcola non solo le semivarianze spaziali e temporali, ma anche l'interazione tra spazio e tempo. 
+
+
+La funzione genera una griglia tridimensionale di valori di semivarianza:
+
+Semivarianza Spaziale: Calcolata per punti separati da lag spaziali definiti.
+Semivarianza Temporale: Calcolata per punti separati da lag temporali definiti.
+Semivarianza Spazio-Temporale: Calcolata per punti separati sia spazialmente che temporalmente.
+
+
+* np rappresenta il numero di coppie di punti che contribuiscono al calcolo della semivarianza per un determinato bin.
+* Un bin rappresenta un intervallo di distanza spaziale (o temporale) entro il quale le coppie di punti vengono raggruppate per calcolare la semivarianza. (per distanze piu grandi ci sono piu combinaizoni di coppie)
+
+* space lag rappresenta il centro del bin spaziale (cioè, la distanza media per un determinato intervallo di distanze).
+avgDist è la distanza media effettiva tra tutte le coppie di punti che rientrano in un dato space lag (bin).
+
+```{r}
+plot(st_variogram) 
+plot(st_variogram,map=F) 
+plot(st_variogram,wireframe=T) 
+```
+
+Colori: rappresentano la semivarianza calcolata per ogni combinazione di distanza spaziale e lag temporale.Man mano che ci si sposta verso destra (maggiore distanza) o verso l'alto (maggiore lag temporale), i valori di semivarianza aumentano, indicando una diminuzione della correlazione spaziale e temporale.
+
+secondo grafico:
+Le curve mostrano come la correlazione diminuisce sia con la distanza spaziale sia con il lag temporale. Le osservazioni più lontane nello spazio e nel tempo hanno una dissimilarità maggiore.Il plateau raggiunto da alcune curve (gamma stabili a distanze maggiori) suggerisce che dopo una certa distanza spaziale e temporale non ci sia più correlazione significativa.
+l'autocorrelazione temporale diminuisce con l'aumento del lag temporale e la differenza di lag tra lag6 e lag7 è poco pronunciato.Questo suggerisce che l'effetto dell'autocorrelazione temporale potrebbe essere trascurabile oltre un certo numero di giorni.
+
+
+```{r}
+par(
+  mar = c(5, 4, 4, 3),       # Margini (basso, sinistra, alto, destra)
+  cex.axis = 0.6,            # Ridimensiona i numeri sugli assi
+  cex.lab = 0.6,             # Ridimensiona le etichette degli assi
+  cex.main = 0.6,            # Ridimensiona il titolo del grafico
+  cex.sub = 0.6              # Ridimensiona il sottotitolo
+)
+
+# Grafico 2D del variogramma
+plot(st_variogram, map = FALSE, 
+     xlab = "Distance lag (m)",   # Etichetta asse X
+     ylab = "Semivariance (gamma)" # Etichetta asse Y
+)
+```
+
+
+
+
+```{r}
+###sill si basa su gamma
+#il plateu empirico viene raggiunto a 200.18937 
+#lower_sill 100.0947 (0.5 *)
+#upper_sill 400.3787 (2 *)
+###range si basa s dist
+# max(ep_variogram[ep_variogram$timelag == 0, "dist"])
+#range_spaziale_max = 3559.229             #3.56
+#lower_range_spaziale = 1779.614 (0.5 *)   #1.78
+#upper_range_spaziale =  7118.458  (2 *)   #7.12
+###range temporale si basa su timelag
+#max(ep_variogram[ep_variogram$spacelag == 0, "timelag"])
+#range_temporale_max 6
+#lower_range_temporale = 3
+#upper_range_temporale = 12
+#nugget si basa su gamma
+#nugget_empirico = 77.87708 valore minimo di gamma a lag zero
+#lower_nugget <- 0
+#upper_nugget <- 100.0947
+```
+range_spaziale_max = 3559.229
+
+
+
+
+ stima l'anisotropia spazio-temporale (il rapporto tra scala spaziale e temporale) partendo dal variogramma empirico.
+```{r}
+#  Stima dell'anisotropia lineare spazio-temporale (Stima un parametro che bilancia le unità spaziali e temporali)Serve a rendere comparabili le due dimensioni (spazio e tempo).
+linStAnisotropia <- estiStAni(
+  st_variogram ,
+  interval = c(0, 200000)  # Range per la stima dell'anisotropia
+)
+#Estimation of the spatio-temporal anisotropy without an underlying spatio-temporal model. Different methods are implemented using a linear model to predict the temporal gamma values or the ratio of the ranges of a spatial and temporal variogram model or a spatial variogram model to predict the temporal gamma values or the spatio-temporal anisotropy value as used in a metric spatio-temporal variogram.
+```
+
+ Questa stima è fondamentale per comprendere la relazione tra le distanze spaziali e quelle temporali, una componente chiave del modello spazio-temporale.
+ 
+```{r}
+print(linStAnisotropia)  # Valore stimato dell'anisotropia
+```
+
+
+
+
+
+
+
+
+
+
+```{r}
+# Creazione del grafico del variogramma empirico
+plot(gamma~timelag, st_variogram)
+```
+L'anisotropia spazio-temporale è un parametro che stabilisce il rapporto di scala tra lo spazio e il tempo. Questo valore consente di confrontare e integrare le dimensioni spaziale e temporale in modo coerente, traducendo le differenze temporali in distanze spaziali equivalenti.Se due punti sono separati da 1 unità temporale, questo valore di anisotropia indica che ciò equivale a 10447.56 unità spaziali.Un valore elevato come 10447.56 significa che, nel tuo dataset, le variazioni temporali hanno un impatto molto maggiore rispetto alle variazioni spaziali.
+
+
+```{r}
+#Dividendo le distanze per 1000, le distanze spaziali vengono convertite da metri a chilometri. Questo rende più facile interpretare i risultati, dato che in molti casi le analisi geostatistiche utilizzano i chilometri come unità standard.
+
+# rescale empVgm and linStAni to km for estimation
+
+st_variogram$dist  <- st_variogram$dist/1000
+
+st_variogram$avgDist  <- st_variogram$avgDist/1000
+
+st_variogram$spacelag <- st_variogram$spacelag/1000
+
+linStAnisotropia <- linStAnisotropia/1000
+```
+
+
+
+```{r}
+#max(dist(stfdf@sp@coords))
+#[1] 8712.648
+
+#as.numeric(difftime(max(stfdf@time), min(stfdf@time), units = "days"))
+#[1] 0.0084375
+```
+
+
+# Il sill rappresenta la varianza totale spiegata dalla componente spaziale (var 291.4489, sillmax= var * 1.2 (349.7387)), sill 0,9 indica che il il 90% della varianza totale è spiegata dalle componenti spaziali e temporali combinate,mentre il valore complessivo nel mdoello è deifniyo da sill=120 per riflettere l'entita globale.
+
+Range spaziale signifca che la correlazione spaziale è significativa entro un raggio di 200 km. dopo questa distanza i punti non sono considerati correlati. 
+range temporale (3.5 unita)= la correlazione  la correlazione temporale è significativa entro un intervallo temporale di 3.5 unità (ad esempio, giorni, ore, o qualsiasi unità temporale dei dati).
+
+Nugget di 0.1:Rappresenta la varianza microscopica o errori di misura. Il valore 0.1 indica che una piccola parte della varianza è dovuta a variabilità non spiegata
+
+
+```{r}
+# Adattamento di un modello separabile al variogramma empirico
+
+
+#Dal variogramma empirico (seconda immagine), il plateau si raggiunge attorno a 3-4 km
+#Il variogramma temporale (linee colorate) indica che la correlazione temporale si riduce notevolmente dopo 3-4 giorni.
+```
+
+Il modello esponenziale ("Exp") è spesso utilizzato per descrivere fenomeni spaziali che hanno un decadimento continuo e graduale della correlazione con la distanza.
+
+Il modello sferico ("Sph") è adatto per fenomeni con un decadimento più rapido e con un range ben definito
+
+
+
+following (https://cran.r-project.org/web/packages/gstat/vignettes/spatio-temporal-kriging.pdf) it is advised to use an optimisation
+routine that allows to impose limits on the search space (i.e. L-BFGS-B) and provide sensible limits
+via lower and upper.
+
+
+
+La funzione fit.StVariogram() prende il modello iniziale (separableModel) e il variogramma empirico (empVgm) per adattare i parametri del modello teorico ai dati osservati.
+
+
+
+
+
+
+
+
+
+
+
+
+
+```{r}
+ #range.s    nugget.s     range.t    nugget.t        sill 
+# 99.9993911   0.4108809   5.7231985   0.4677081 188.8573287 
+# Adattamento di un modello separabile al variogramma empirico
+
+#Dal variogramma empirico (seconda immagine), il plateau si raggiunge attorno a 3-4 km
+#Il variogramma temporale (linee colorate) indica che la correlazione temporale si riduce notevolmente dopo 3-4 giorni.
+# Fitting del modello product-sum
+fitSepModel <- fit.StVariogram(
+  st_variogram, 
+  model_productSum, 
+  fit.method =2,       # Metodo di fitting
+  stAni = linStAnisotropia,     # Rapporto anisotropico stimato
+  method = "L-BFGS-B",  # Ottimizzatore vincolato
+  control = list(parscale = c(10,20,5,10)),  # ParScale per 7 parametri
+    # Limiti superiori: sill sp, nugget sp, range sp, sill temp, nugget temp, range temp, k
+)
+
+
+#Parametro	Nuovo Lower	Nuovo Upper
+#Range spaziale	1500	2000
+#Psill spaziale	0.3	1
+#Range temporale	5	7
+#Psill temporale	0.3	1
+#Anisotropia (stAni)	100	200
+
+#1. Analisi dei valori stimati
+#Dai grafici delle componenti del modello (space e time), possiamo interpretare i parametri:
+
+#Componente spaziale:
+#Nugget: 0.422488
+#Psill: 0.577512
+#Range: 1780
+#Componente temporale:
+#Nugget: 0.4675406
+#Psill: 0.5324594
+#Range: 5.72293
+```
+
+
+
+```{r}
+attr(fitSepModel, "MSE")
+```
+```{r}
+ extractPar(fitSepModel)
+```
+```{r}
+fitSepModel$space
+```
+
+
+```{r}
+fitSepModel$sill
+```
+
+
+
+
+
+
+```{r}
+variogram_esempio<- autofitVariogram(PM10 ~ 1, (lag = st_variogram$timelag, gamma = st_variogram$gamma))
+
+```
+
+
+È una misura di quanto bene il modello teorico (fitSepModel) si adatta ai dati del variogramma empirico.
+ il fitting è considerato buono secondo questa metrica. Serve principalmente per valutare la convergenza dell'ottimizzatore e identificare problemi numerici (non è la metrica principale per confrontare i modelli).
+ 
+ 
+per la space function, il nugget è 0.4 (la variabilità spaziale non spiegata a distanza zero).  Il modello esponenziale indica che la correlazione spaziale diminuisce esponenzialmente con la distanza, con un range effettivo di 4 km, con un partial sill di 0.6
+
+per la time function, il nugget 0.67 molto elevato con una componente cosistente di variaiblità non spiegata. appresenta la porzione di variabilità temporale spiegata dal modello sferico entro il range temporale di 3.2 giorni. la variabilità combinata spiegata è  170.2084 
+
+
+
+```{r}
+extractPar(fitSepModel)
+```
+
+
+joint = cattura la relazione combinata spazio-tempo.Test: prova a confrontare due modelli con e senza joint e osserva se migliora il fitting.
+L'obiettivo è trovare la migliore funzione di covarianza per rappresentare la struttura di PM10.
+
+Il psill rappresenta la parte variabile della varianza spiegata dalla struttura spaziale:psill=sill−nugget
+
+
+```{r}
+
+#il plateu empirico viene raggiunto a 200.18937 
+
+#nugget_empirico = 77.87708 valore minimo di gamma a lag zero
+200.18937 -  77.87708
+
+
+#sill 200 , nugget_empirico= 140
+200- 140
+```
+
+
+```{r}
+modello_sep <- function() {
+models <- list(
+  Exp_Exp = vgmST("separable", space = vgm(0.6, "Exp", 200, 0.4), time = vgm(0.6, "Exp", 6, 0.5), sill = 200),
+  Exp_Sph = vgmST("separable", space = vgm(0.6, "Exp", 200, 0.4), time = vgm(0.6, "Sph", 6, 0.5), sill = 200),
+  Sph_Sph = vgmST("separable", space = vgm(0.6, "Sph", 200, 0.4), time = vgm(0.6, "Sph", 6, 0.5), sill = 200),
+  Sph_Exp = vgmST("separable", space = vgm(0.6, "Sph", 200, 0.4), time = vgm(0.6, "Exp", 6, 0.5), sill = 200),
+  Sph_Gau = vgmST("separable", space = vgm(0.6, "Sph", 200, 0.4), time = vgm(0.6, "Gau", 6, 0.5), sill = 200),
+  Gau_Sph = vgmST("separable", space = vgm(0.6, "Gau", 200, 0.4), time = vgm(0.6, "Sph", 6, 0.5), sill = 200),
+  Gau_Exp = vgmST("separable", space = vgm(0.6, "Gau", 200, 0.4), time = vgm(0.6, "Exp", 6, 0.5), sill = 200),
+  Exp_Gau = vgmST("separable", space = vgm(0.6, "Exp", 200, 0.4), time = vgm(0.6, "Gau", 6, 0.5), sill = 200),
+  Gau_Gau = vgmST("separable", space = vgm(0.6, "Gau", 200, 0.4), time = vgm(0.6, "Gau", 6, 0.5), sill = 200)
+  )
+
+modellist <- list()
+for (model_name in names(models)) {
+  fit <- fit.StVariogram(
+    st_variogram,
+    models[[model_name]],
+    fit.method = 6,
+    stAni = linStAnisotropia,
+    method = "L-BFGS-B",
+    control = list(parscale = c(10, 1, 10, 1, 100)),
+    lower = c(50, 0, 3, 0, 1),  ## Lb: sill, nugget, range sp, nugget temp, range temp 
+    upper = c(100, 1, 10, 1, 10))  ## up: sill, nugget, range sp, nugget temp, range temp 
+# Crea data frame per space  
+  space_df <- data.frame(partial_sill = round(fit$space[2,2],2), model = fit$space[2,1],  range= paste(fit$space[2,3], "km"), nugget = fit$space[1,2], sp_temp.sill = fit$sill )
+  
+  time_df <- data.frame(partial_sill = round(fit$time[2, 2],2),  model = fit$time[2, 1], range = paste(round(fit$time[2, 3],2), "days"), nugget = round(fit$time[1, 2],2), sp_temp.sill = fit$sill)
+  modellist[[model_name]] <- list(
+    optim.output = attr(fit, "optim.output")$value,
+    MSE = attr(fit, "MSE"),
+    fit_table = rbind(space_df, time_df),
+    fit= fit)
+   
+}  
+
+best_model_name <- names(modellist)[which.min(sapply(modellist, function(model) model$MSE))]
+bestModel <- modellist[[best_model_name]] 
+cat(best_model_name,"\n")
+cat("MSE: ", bestModel$MSE,"\n")
+cat("optim.output: ", bestModel$optim.output)
+return(list(
+  bestModel= bestModel,
+  t_modelli=modellist))
+}
+#Gau_Sph 
+#MSE:  0.03727629 
+#optim.output:  0.03727629
+```
+
+```{r}
+mod_sep <- modello_sep()
+```
+
+```{r}
+mod_sep$bestModel
+```
+
+```{r}
+extractPar(mod_sep$bestModel$fit)
+```
+
+
+
+
+
+
+
+ La combinazione ottimale è data dalla funzione esponenziale per lo spazio e dalla funzione sferica per il tempo, che ha ottenuto un Mean Squared Error (MSE) pari a 95.0759.
+ La componente spaziale è stata modellata con una funzione esponenziale.Nugget: 0.4352, che indica una variabilità residua significativa non spiegata a distanza zero. Sill: 0.56, che rappresenta la frazione di varianza spaziale spiegata dal modello. Solo il 56% della variabilità spaziale totale è catturata.Range Spaziale: Circa 10 km, oltre i quali la correlazione spaziale diminuisce rapidamente.
+La componente temporale è stata modellata con una funzione sferica.Nugget: 0.48, che indica una variabilità residua non spiegata nelle scale temporali più piccole, simile al comportamento osservato nella componente spaziale.Sill: 0.52, indicando che il plateau temporale viene raggiunto, spiegando solo il 52% della varianza totale temporale.
+ Per modellare la componente spaziale viene usata una curva esponenziale.5.58 sono i giorni oltre i quali la correlazione temporale si riduce significativamente.
+```{r}
+plot(st_variogram, mod_sep$bestModel$fit, wireframe=T, all=T, scales=list(arrows=F) )
+```
+La superficie del modello separabile segue l'andamento generale del semivariogramma empirico, indicando un buon adattamento.Tuttavia, la curva del modello è più liscia rispetto all'empirico. Questo è normale, dato che il modello teorico "appiana" le fluttuazioni osservate nei dati reali.
+
+
+
+```{r}
+modello_productSum <- function() {
+models <- list(
+  Exp_Exp = vgmST("productSum", space = vgm(0.123, "Exp", 200, 0.08), time = vgm(12, "Exp", 1.5, 2), k = 50),
+  Exp_Sph = vgmST("productSum", space = vgm(0.123, "Exp", 200, 0.08), time = vgm(12, "Sph", 1.5, 2), k = 50),
+  Sph_Sph = vgmST("productSum", space = vgm(0.123, "Sph", 200, 0.08), time = vgm(12, "Sph", 1.5, 2), k = 50),
+  Sph_Exp = vgmST("productSum", space = vgm(0.123, "Sph", 200, 0.08), time = vgm(12, "Exp", 1.5, 2), k = 50),
+  Sph_Gau = vgmST("productSum", space = vgm(0.123, "Sph", 200, 0.08), time = vgm(12, "Gau", 1.5, 2), k = 50),
+  Gau_Sph = vgmST("productSum", space = vgm(0.123, "Gau", 200, 0.08), time = vgm(12, "Sph", 1.5, 2), k = 50),
+  Gau_Exp = vgmST("productSum", space = vgm(0.123, "Gau", 200, 0.08), time = vgm(12, "Exp", 1.5, 2), k = 50),
+  Exp_Gau = vgmST("productSum", space = vgm(0.123, "Exp", 200, 0.08), time = vgm(12, "Gau", 1.5, 2), k = 50),
+  Gau_Gau = vgmST("productSum", space = vgm(0.123, "Gau", 200, 0.08), time = vgm(12, "Gau", 1.5, 2), k = 50)
+  )
+
+modellist <- list()
+for (model_name in names(models)) {
+  fit <- fit.StVariogram(
+    st_variogram,
+    models[[model_name]],
+    fit.method = 6,
+    stAni = linStAnisotropia,
+    method = "L-BFGS-B",
+    lower = c(0.01, 0.1, 10, 0.5, 0.5),  ## Soglie più sicure
+    upper = c(200, 1,20, 5, 50), ## up: sill, nugget, range sp, nugget temp, range temp 
+    control = list(parscale = c(0.1, 0.5, 100, 10, 5, 1, 10)))
+   
+    #lower = c(50, 0, 3, 0, 10),  ## Lb: sill, nugget, range sp, nugget temp, range temp 
+   # upper = c(100, 1, 10, 1, 200))  ## up: sill, nugget, range sp, nugget temp, range temp     
+# Crea data frame per space  
+  space_df <- data.frame(partial_sill = round(fit$space[2,2],2), model = fit$space[2,1],  range= paste(fit$space[2,3], "km"), nugget = fit$space[1,2], sp_temp.k = fit$k )
+  
+  time_df <- data.frame(partial_sill = round(fit$time[2, 2],2),  model = fit$time[2, 1], range = paste(round(fit$time[2, 3],2), "days"), nugget = round(fit$time[1, 2],2), sp_temp.k = fit$k)
+  modellist[[model_name]] <- list(
+    optim.output = attr(fit, "optim.output")$value,
+    MSE = attr(fit, "MSE"),
+    fit_table = rbind(space_df, time_df),
+    fit= fit)
+   
+}  
+
+best_model_name <- names(modellist)[which.min(sapply(modellist, function(model) model$MSE))]
+bestModel <- modellist[[best_model_name]] 
+cat(best_model_name,"\n")
+cat("MSE: ", bestModel$MSE,"\n")
+cat("optim.output: ", bestModel$optim.output)
+return(list(
+  bestModel= bestModel,
+  t_modelli=modellist))
+}
+```
+
+
+```{r}
+mod_productSum <- modello_productSum()
+```
+
+
+
+
+
+
+
+
+```{r}
+mod_productSum$bestModel 
+```
+Se il partial sill è maggiore del nugget, significa che il modello è in grado di spiegare una buona parte della varianza totale.
+
+
+ La combinazione ottimale è data dalla funzione sferica per lo spazio e dalla funzione sferica per il tempo, che ha ottenuto un Mean Squared Error (MSE) pari a 95.65.
+il componente k influenza maggiormente la componente spaziale, k=53, suggerendo che la dipendenza spaziale è particolarmente influente nella variabilità complessiva.. in questo caso ho un nugget di 0.19, un partial sill di 0.26 e range spaziale di 200km,oltre i quali la correlazione spaziale diminuisce rapidamente.
+La componente temporale è stata modellata con una funzione sferica.Nugget: 3.47 variabile residua non spiegata, che indica una variabilità residua non spiegata nelle scale temporali più piccole.partial Sill: 3.95  che rappresenta la frazione di varianza spiegata dalla componente temporale mentre 5.7 sono i giorni oltre i quali la correlazione temporale si riduce significativamente.
+
+
+```{r}
+mod_sep$bestModel 
+```
+
+
+
+
+La componente spaziale è stata modellata con una funzione esponenziale.Nugget: 0.4352, che indica una variabilità residua significativa non spiegata a distanza zero. Sill: 0.56, che rappresenta la frazione di varianza spaziale spiegata dal modello. Solo il 56% della variabilità spaziale totale è catturata.Range Spaziale: Circa 100 km, oltre i quali la correlazione spaziale diminuisce rapidamente.
+La componente temporale è stata modellata con una funzione sferica.Nugget: 0.48, che indica una variabilità residua non spiegata nelle scale temporali più piccole, simile al comportamento osservato nella componente spaziale.Sill: 0.52, indicando che il plateau temporale viene raggiunto, spiegando solo il 52% della varianza totale temporale.
+ Per modellare la componente spaziale viene usata una curva esponenziale.5.58 sono i giorni oltre i quali la correlazione temporale si riduce significativamente.
+
+
+
+```{r}
+plot(st_variogram, list(mod_sep$bestModel$fit, mod_productSum$bestModel$fit), wireframe=T, all=T, scales=list(arrows=F) )
+```
+
+
+
+
+```{r}
+modello_metric <- function() {
+models <- list(
+  Exp = vgmST("metric", "Exp", joint = vgm(200, "Exp",4, 10 ),stAni = linStAnisotropia),
+  Sph = vgmST("metric", "Sph", joint = vgm(200, "Exp",4, 10 ),stAni = linStAnisotropia),
+  Gau = vgmST("metric","Gau", joint = vgm(200, "Exp",4, 10 ),stAni = linStAnisotropia)
+  )
+
+modellist <- list()
+for (model_name in names(models)) {
+  fit <- fit.StVariogram(
+    st_variogram,
+    models[[model_name]],
+    fit.method = 6,
+    stAni = linStAnisotropia,
+    method = "L-BFGS-B", 
+    control = list(parscale = c(10,20,5,10)),
+     lower = c(1, 0.1, 1, 0.1, 1),  ## Lb: sill, nugget, range sp, nugget temp, range temp 
+    upper = c(100, 1, 40, 1, 20))
+   
+     ## up: sill, nugget, range sp, nugget temp, range temp     
+# Crea data frame per space  
+  fit_table <-fit$joint
+  fit_table$sp_temp.stAni <- NA  # Imposta tutte le righe a NA
+  fit_table$sp_temp.stAni[1] <- fit$stAni
+  modellist[[model_name]] <- list(
+    fit_table = fit_table,
+    optim.output = attr(fit, "optim.output")$value,
+    MSE = attr(fit, "MSE"),
+    fit= fit)
+   
+}  
+
+best_model_name <- names(modellist)[which.min(sapply(modellist, function(model) model$MSE))]
+bestModel <- modellist[[best_model_name]] 
+cat(best_model_name,"\n")
+cat("MSE: ", bestModel$MSE,"\n")
+cat("optim.output: ", bestModel$optim.output)
+return(list(
+  bestModel= bestModel,
+  t_modelli=modellist))
+}
+```
+
+
+```{r}
+mod_metric <- modello_metric()
+```
+
+
+
+
+
+
+```{r}
+mod_metric$bestModel$fit_table
+```
+ la varianza non spiegata del modello è 90.79,.L'anisotropia spazio-temporale suggerisce che una variazione temporale corrisponde a circa 618414 unità spaziali.Il range spaziale 1,353,705 è molto grande, indicando una forte dipendenza spaziale a lungo raggio. risetto ai 8km, Questo suggerisce che tutti i dati sono visti come altamente correlati nello spazio. Potrebbe indicare che il modello sta dando più importanza alla dipendenza temporale e sottostimando la struttura spaziale.
+
+Metric fornisce un miglior fit ai dati,MSE:  26.9328.
+
+```{r}
+plot(st_variogram, list(mod_sep$bestModel$fit, mod_productSum$bestModel$fit, mod_metric$bestModel$fit), wireframe=T, all=T, scales=list(arrows=F) )
+```
+
+
+
+```{r}
+modello_sumMetric <- function() {
+models <- list(
+Exp_Exp_Exp = vgmST("sumMetric", space = vgm(10, "Exp", 4000, 0.2), time = vgm(100, "Exp", 4, 8),
+  joint = vgm(10, "Exp", 3000, 90), stAni = linStAnisotropia),
+Exp_Sph_Exp = vgmST("sumMetric", space = vgm(10, "Exp", 4000, 0.2), time = vgm(100, "Sph", 4, 8),
+                        joint = vgm(10, "Exp", 3000, 90), stAni = linStAnisotropia),
+Exp_Sph_Sph = vgmST("sumMetric", space = vgm(10, "Exp", 4000, 0.2), time = vgm(100, "Sph", 4, 8),
+                        joint = vgm(10, "Sph", 3000, 90), stAni = linStAnisotropia),
+Exp_Exp_Sph = vgmST("sumMetric", space = vgm(10, "Exp", 4000, 0.2), time = vgm(100, "Exp", 4, 8),
+                        joint = vgm(10, "Sph", 3000, 90), stAni = linStAnisotropia),
+Exp_Gau_Exp = vgmST("sumMetric", space = vgm(10, "Exp", 4000, 0.2), time = vgm(100, "Gau", 4, 8),
+                        joint = vgm(10, "Exp", 3000, 90), stAni = linStAnisotropia),
+Exp_Gau_Gau = vgmST("sumMetric", space = vgm(10, "Exp", 4000, 0.2), time = vgm(100, "Gau", 4, 8),
+                        joint = vgm(10, "Gau", 3000, 90), stAni = linStAnisotropia),
+Exp_Exp_Gau = vgmST("sumMetric", space = vgm(10, "Exp", 4000, 0.2), time = vgm(100, "Exp", 4, 8),
+                        joint = vgm(10, "Gau", 3000, 90), stAni = linStAnisotropia),
+Exp_Sph_Gau = vgmST("sumMetric", space = vgm(10, "Exp", 4000, 0.2), time = vgm(100, "Sph", 4, 8),
+                        joint = vgm(10, "Gau", 3000, 90), stAni = linStAnisotropia),
+Exp_Gau_Sph = vgmST("sumMetric", space = vgm(10, "Exp", 4000, 0.2), time = vgm(100, "Gau", 4, 8),
+                        joint = vgm(10, "Sph", 3000, 90), stAni = linStAnisotropia),
+
+Sph_Sph_Sph = vgmST("sumMetric", space = vgm(10, "Sph", 4000, 0.2), time = vgm(100, "Sph", 4, 8),
+                     joint = vgm(10, "Sph", 3000, 90), stAni = linStAnisotropia),
+Sph_Exp_Sph = vgmST("sumMetric", space = vgm(10, "Sph", 4000, 0.2), time = vgm(100, "Exp", 4, 8),
+                     joint = vgm(10, "Sph", 3000, 90), stAni = linStAnisotropia),
+Sph_Exp_Exp = vgmST("sumMetric", space = vgm(10, "Sph", 4000, 0.2), time = vgm(100, "Exp", 4, 8),
+                     joint = vgm(10, "Exp", 3000, 90), stAni = linStAnisotropia),
+Sph_Sph_Exp = vgmST("sumMetric", space = vgm(10, "Sph", 4000, 0.2), time = vgm(100, "Sph", 4, 8),
+                     joint = vgm(10, "Exp", 3000, 90), stAni = linStAnisotropia),
+Sph_Gau_Sph = vgmST("sumMetric", space = vgm(10, "Sph", 4000, 0.2), time = vgm(100, "Gau", 4, 8),
+                     joint = vgm(10, "Sph", 3000, 90), stAni = linStAnisotropia),
+Sph_Gau_Gau = vgmST("sumMetric", space = vgm(10, "Sph", 4000, 0.2), time = vgm(100, "Gau", 4, 8),
+                     joint = vgm(10, "Gau", 3000, 90), stAni = linStAnisotropia),
+Sph_Sph_Gau = vgmST("sumMetric", space = vgm(10, "Sph", 4000, 0.2), time = vgm(100, "Sph", 4, 8),
+                     joint = vgm(10, "Gau", 3000, 90), stAni = linStAnisotropia),
+Sph_Exp_Gau = vgmST("sumMetric", space = vgm(10, "Sph", 4000, 0.2), time = vgm(100, "Exp", 4, 8),
+                     joint = vgm(10, "Gau", 3000, 90), stAni = linStAnisotropia),
+Sph_Gau_Exp = vgmST("sumMetric", space = vgm(10, "Sph", 4000, 0.2), time = vgm(100, "Gau", 4, 8),
+                     joint = vgm(10, "Exp", 3000, 90), stAni = linStAnisotropia),
+
+Gau_Gau_Gau = vgmST("sumMetric", space = vgm(10, "Gau", 4000, 0.2), time = vgm(100, "Gau", 4, 8),
+                        joint = vgm(10, "Gau", 3000, 90), stAni = linStAnisotropia),
+Gau_Exp_Gau = vgmST("sumMetric", space = vgm(10, "Gau", 4000, 0.2), time = vgm(100, "Exp", 4, 8),
+                        joint = vgm(10, "Gau", 3000, 90), stAni = linStAnisotropia),
+Gau_Exp_Exp = vgmST("sumMetric", space = vgm(10, "Gau", 4000, 0.2), time = vgm(100, "Exp", 4, 8),
+                        joint = vgm(10, "Exp", 3000, 90), stAni = linStAnisotropia),
+Gau_Gau_Exp = vgmST("sumMetric", space = vgm(10, "Gau", 4000, 0.2), time = vgm(100, "Gau", 4, 8),
+                        joint = vgm(10, "Exp", 3000, 90), stAni = linStAnisotropia),
+Gau_Sph_Gau = vgmST("sumMetric", space = vgm(10, "Gau", 4000, 0.2), time = vgm(100, "Sph", 4, 8),
+                        joint = vgm(10, "Gau", 3000, 90), stAni = linStAnisotropia),
+Gau_Sph_Sph = vgmST("sumMetric", space = vgm(10, "Gau", 4000, 0.2), time = vgm(100, "Sph", 4, 8),
+                        joint = vgm(10, "Sph", 3000, 90), stAni = linStAnisotropia),
+Gau_Gau_Sph = vgmST("sumMetric", space = vgm(10, "Gau", 4000, 0.2), time = vgm(100, "Gau", 4, 8),
+                        joint = vgm(10, "Sph", 3000, 90), stAni = linStAnisotropia),
+Gau_Exp_Sph = vgmST("sumMetric", space = vgm(10, "Gau", 4000, 0.2), time = vgm(100, "Exp", 4, 8),
+                        joint = vgm(10, "Sph", 3000, 90), stAni = linStAnisotropia),
+Gau_Sph_Exp = vgmST("sumMetric", space = vgm(10, "Gau", 4000, 0.2), time = vgm(100, "Sph", 4, 8),
+                        joint = vgm(10, "Exp", 3000, 90), stAni = linStAnisotropia)
+
+ )
+
+modellist <- list()
+for (model_name in names(models)) {
+ # cat("Fitting model:", model_name, "\n")  # Debugging
+  fit <- fit.StVariogram(st_variogram, models[[model_name]], 
+                fit.method = 6, stAni=linStAnisotropia,
+                 method = "L-BFGS-B", 
+                 lower = c(sill.s = 0.1,  range.s = 1,  nugget.s = 0.1,
+                           sill.t = 0.1,  range.t = 0.1,   nugget.t = 0.1,
+                           sill.st= 0.1, range.st = 10, nugget.st = 0.1, 
+                           anis = 400),
+                
+                 control = list(parscale = c(1,100,1,1,0.5,1,1,100,1,100),
+                               maxit=1e4))
+# Crea data frame per space  
+  space  <- data.frame(partial_sill = round(fit$space[2,2],2), model = fit$space[2,1],  range= paste(fit$space[2,3], "km"), nugget = fit$space[1,2], tipo = "space")
+  time  <- data.frame(partial_sill = round(fit$time[2,2],2), model = fit$time[2,1],  range= paste(fit$time[2,3], "km"), nugget = fit$time[1,2],tipo = "time")
+  joint  <- data.frame(partial_sill = round(fit$joint[2,2],2), model = fit$joint[2,1],  range= paste(fit$joint[2,3], "km"), nugget = fit$joint[1,2],tipo = "joint")
+
+  fit_table <-  rbind(space, time, joint)
+  fit_table$sp_temp_joint.stAni <- NA  # Imposta tutte le righe a NA
+  fit_table$sp_temp_joint.stAni[1] <- fit$stAni
+  
+  
+  
+  modellist[[model_name]] <- list(
+    optim.output = attr(fit, "optim.output")$value,
+    MSE = attr(fit, "MSE"),
+    fit_table = fit_table,
+    fit= fit)
+   
+}  
+
+best_model_name <- names(modellist)[which.min(sapply(modellist, function(model) model$MSE))]
+bestModel <- modellist[[best_model_name]] 
+cat(best_model_name,"\n")
+cat("MSE: ", bestModel$MSE,"\n")
+cat("optim.output: ", bestModel$optim.output)
+return(list(
+  bestModel= bestModel,
+  t_modelli=modellist))
+}
+
+#Exp_Gau_Sph 
+#MSE:  16.20122 
+#optim.output:  16.20122
+```
+
+
+```{r}
+mod_sumMetric <- modello_sumMetric()
+```
+
+# loocv
+
+```{r}
+####################################modello_sep#####################
+modello_sep <-  vgmST("separable", space = vgm(0.6, "Gau", 200, 0.4), time = vgm(0.6, "Sph", 6, 0.5), sill = 200)
+
+fitsepModel <-  fit.StVariogram(
+    st_variogram,
+    modello_sep,
+    fit.method = 6,
+    stAni = linStAnisotropia,
+    method = "L-BFGS-B",
+    control = list(parscale = c(10, 1, 10, 1, 100)),
+    lower = c(50, 0, 3, 0, 1),  ## Lb: sill, nugget, range sp, nugget temp, range temp 
+    upper = c(100, 1, 10, 1, 20)) 
+####################################modello_productSum#####################
+modello_productSum <-  vgmST("productSum", space = vgm(0.123, "Exp", 200, 0.08), time = vgm(12, "Gau", 1.5, 2), k = 50)
+
+fitproductSumModel <-  fit.StVariogram(
+    st_variogram,
+    modello_productSum,
+    fit.method = 6,
+    stAni = linStAnisotropia,
+    method = "L-BFGS-B",
+    lower = c(0.01, 0.1, 10, 0.5, 0.5),  ## Soglie più sicure
+    upper = c(200, 1,20, 5, 50),
+    control = list(parscale = c(0.1, 0.5, 100, 10, 5, 1, 10)))
+####################################modello_metric#####################
+modello_metric <-  vgmST("metric", "Exp", joint = vgm(200, "Exp",4, 10 ),stAni = linStAnisotropia)
+
+fitmetricModel <-  fit.StVariogram(
+    st_variogram,
+    modello_metric ,
+    fit.method = 6,
+    stAni = linStAnisotropia,
+    method = "L-BFGS-B", 
+    lower = c(1, 0.1, 1, 0.1, 1),  ## Lb: sill, nugget, range sp, nugget temp, range temp 
+    upper = c(100, 1, 40, 1, 20),
+    control = list(parscale = c(10,20,5,10)))
+####################################modello_sumMetric#####################
+modello_sumMetric <-vgmST("sumMetric", space = vgm(10, "Exp", 4000, 0.2), time = vgm(100, "Exp", 4, 8),
+                        joint = vgm(10, "Sph", 3000, 90), stAni = linStAnisotropia)
+
+fitsumMetricModel <- fit.StVariogram(st_variogram,modello_sumMetric , 
+                fit.method = 6, stAni=linStAnisotropia,
+                 method = "L-BFGS-B", 
+                 lower = c(sill.s = 0,  range.s = 10,  nugget.s = 0,
+                           sill.t = 0,  range.t = 0.1,   nugget.t = 0,
+                           sill.st= 0, range.st = 10, nugget.st = 0, 
+                           anis = 400),
+                
+                 control = list(parscale = c(1,100,1,1,0.5,1,1,100,1,100),
+                               maxit=1e4))
+```
+
+```{r}
+cat("fitsepModel", attr(fitsepModel, "MSE"), "\n")
+cat("fitproductSumModel", attr(fitproductSumModel, "MSE"), "\n")
+cat("fitmetricModel", attr(fitmetricModel, "MSE"), "\n")
+cat("fitsumMetricModel", attr(fitsumMetricModel, "MSE"), "\n")
+#fitsepModel 0.006818786 
+#fitproductSumModel 0.006818786 
+#fitmetricModel 0.006818786 
+#fitsumMetricModel 0.006818786 
+
+#fitsepModel 0.01765043 
+#fitproductSumModel 0.01765043 
+#fitmetricModel 0.01765043 
+#fitsumMetricModel 0.01765043 
+
+#fitsepModel 0.01168994 
+#fitproductSumModel 0.01168994 
+#fitmetricModel 0.01168994 
+#fitsumMetricModel 0.01168994 
+```
+
+```{r}
+ extractPar(fitsumMetricModel)
+```
+```{r}
+plot(st_variogram, list(fitsumMetricModel), wireframe=T, all=T, scales=list(arrows=F) ) 
+```
+```{r}
+plot(st_variogram, list(mod_sep$bestModel$fit, mod_productSum$bestModel$fit, mod_metric$bestModel$fit), wireframe=T, all=T, scales=list(arrows=F) )
+```
+
+
+```{r}
+plot(st_variogram, list(mod_sep$bestModel$fit, mod_productSum$bestModel$fit, mod_metric$bestModel$fit), wireframe=T, all=T, scales=list(arrows=F) ) fitsepModel$
+```
+
+
+```{r}
+stfdf <-stfdf[,,-2 ] #togliamo pm10_ad
+```
+
+
+```{r}
+#specifica il numero massimo di vicini (considerati sia nello spazio che nel tempo) che verranno usati per stimare la variabile alla località-tempo target. In altre parole, questo parametro limita quanti punti saranno presi in considerazione per la predizione.
+##### seprable model
+# 10 neighbours
+res <- matrix(NA, length(stfdf@sp), 730)
+target <- as(stfdf[,,"PM10"],"STFDF") 
+for(loc in 1:length(stfdf@sp)) {
+  cat("Location", loc, "\n")
+  #  assegna le previsioni di PM10 alla matrice res, che è vuota all'inizio.
+  res[loc,!is.na(target[loc, 1:730])[,"PM10"]] <- krigeST(PM10~1, 
+                  data=stfdf[(1:length(stfdf@sp))[-loc],], 
+                  newdata=stfdf[loc, 1:730, drop=F],  #Osservazione da predire (coordinate spaziali e temporali del punto loc
+                  fitsepModel,nmax=10,  lambda = 0.3838384,                                                        stAni=linStAnisotropia)$var1.pred
+} 
+
+stfdf@data$sepModel10Nghbr <- as.vector(res)[!is.na(as.vector(res))]
+# alldata
+res <- matrix(NA, length(stfdf@sp), 730)
+for(loc in 1:length(stfdf@sp)) {
+  cat("Location", loc, "\n")
+  #  assegna le previsioni di PM10 alla matrice res, che è vuota all'inizio.
+  res[loc,!is.na(target[loc, 1:730])[,"PM10"]] <- krigeST(PM10~1, 
+                  data=stfdf[(1:length(stfdf@sp))[-loc],], 
+                  newdata=stfdf[loc, 1:730, drop=F],  #Osservazione da predire (coordinate spaziali e temporali del punto loc
+                  fitsepModel,   lambda = 0.3838384,                                                        stAni=linStAnisotropia)$var1.pred
+} 
+
+stfdf@data$sepModelAll <- as.vector(res)[!is.na(as.vector(res))]
+# 50 neighbours
+res <- matrix(NA, length(stfdf@sp), 730)
+for(loc in 1:length(stfdf@sp)) {
+  cat("Location", loc, "\n")
+  res[loc,!is.na(target[loc, 1:730])[,"PM10"]] <- krigeST(PM10~1, 
+                  data=stfdf[(1:length(stfdf@sp))[-loc],], 
+                  newdata=stfdf[loc, 1:730, drop=F], 
+                  fitsepModel, nmax=50, lambda = 0.3838384,                                                          stAni=linStAnisotropia)$var1.pred
+}
+
+stfdf@data$sepModel50Nghbr <- as.vector(res)[!is.na(as.vector(res))]
+
+############################################################ product-sum model
+# 10 neighbours
+res <- matrix(NA, length(stfdf@sp), 730)
+for(loc in 1:length(stfdf@sp)) {
+  cat("Location", loc, "\n")
+  res[loc,!is.na(target[loc, 1:730])[,"PM10"]] <- krigeST(PM10~1,                                                                data=stfdf[(1:length(stfdf@sp))[-loc],], 
+newdata=stfdf[loc, 1:730, drop=F], 
+fitproductSumModel,nmax=10,lambda = 0.3838384,
+stAni=linStAnisotropia)$var1.pred
+}
+
+stfdf@data$productsumModel10Nghbr <- as.vector(res)[!is.na(as.vector(res))]
+# alldata
+res <- matrix(NA, length(stfdf@sp), 730)
+for(loc in 1:length(stfdf@sp)) {
+  cat("Location", loc, "\n")
+  res[loc,!is.na(target[loc, 1:730])[,"PM10"]] <- krigeST(PM10~1,                                                                data=stfdf[(1:length(stfdf@sp))[-loc],], 
+newdata=stfdf[loc, 1:730, drop=F], 
+fitproductSumModel,lambda = 0.3838384,
+stAni=linStAnisotropia)$var1.pred
+}
+
+stfdf@data$productsumModelAll <- as.vector(res)[!is.na(as.vector(res))]
+
+
+# 50 neighbours
+res <- matrix(NA, length(stfdf@sp), 730)
+for(loc in 1:length(stfdf@sp)) {
+  cat("Location", loc, "\n")
+  res[loc,!is.na(target[loc, 1:730])[,"PM10"]] <- krigeST(PM10~1,                                                                data=stfdf[(1:length(stfdf@sp))[-loc],], 
+newdata=stfdf[loc, 1:730, drop=F], 
+fitproductSumModel, nmax=50,lambda = 0.3838384,
+stAni=linStAnisotropia)$var1.pred
+}
+
+stfdf@data$productsumModel50Nghbr <- as.vector(res)[!is.na(as.vector(res))]
+
+
+#######################################################à metric model
+# 10 neighbours
+res <- matrix(NA, length(stfdf@sp), 730)
+for(loc in 1:length(stfdf@sp)) {
+  cat("Location", loc, "\n")
+  res[loc,!is.na(target[loc, 1:730])[,"PM10"]] <- krigeST(PM10~1, 
+                                                          
+                                data=stfdf[(1:length(stfdf@sp))[-loc],], 
+                                newdata=stfdf[loc, 1:730, drop=F], 
+                                fitmetricModel,nmax=10,lambda = 0.3838384,
+                                stAni=linStAnisotropia)$var1.pred
+}
+
+stfdf@data$metricModel10Nghbr <- as.vector(res)[!is.na(as.vector(res))]
+
+# alldata
+res <- matrix(NA, length(stfdf@sp), 730)
+for(loc in 1:length(stfdf@sp)) {
+  cat("Location", loc, "\n")
+  res[loc,!is.na(target[loc, 1:730])[,"PM10"]] <- krigeST(PM10~1, 
+                                                          
+                                data=stfdf[(1:length(stfdf@sp))[-loc],], 
+                                newdata=stfdf[loc, 1:730, drop=F], 
+                                fitmetricModel,lambda = 0.3838384,
+                                stAni=linStAnisotropia)$var1.pred
+}
+
+stfdf@data$metricModelAll <- as.vector(res)[!is.na(as.vector(res))]
+
+
+# 50 neighbours
+res <- matrix(NA, length(stfdf@sp), 730)
+for(loc in 1:length(stfdf@sp)) {
+  cat("Location", loc, "\n")
+  res[loc,!is.na(target[loc, 1:730])[,"PM10"]] <- krigeST(PM10~1, 
+                                                          
+                                data=stfdf[(1:length(stfdf@sp))[-loc],], 
+                                newdata=stfdf[loc, 1:730, drop=F], 
+                                fitmetricModel, nmax=50,lambda = 0.3838384,
+                                stAni=linStAnisotropia)$var1.pred
+}
+
+stfdf@data$metricModel50Nghbr <- as.vector(res)[!is.na(as.vector(res))]
+
+
+####################################################àà sum-metric model
+# 10 neighbours
+res <- matrix(NA, length(stfdf@sp), 730)
+for(loc in 1:length(stfdf@sp)) { # loc <- 1
+  cat("Location", loc, "\n")
+  res[loc,!is.na(target[loc, 1:730])[,"PM10"]] <- krigeST(PM10~1,
+                                                                                                                 data=stfdf[(1:length(stfdf@sp))[-loc],], 
+                                  newdata=stfdf[loc, 1:730, drop=F], 
+                                  fitsumMetricModel, nmax=10, lambda = 0.3838384,
+                                  stAni=linStAnisotropia)$var1.pred
+}
+
+stfdf@data$sumMetricModel10Nghbr <- as.vector(res)[!is.na(as.vector(res))]
+# Alldata
+res <- matrix(NA, length(stfdf@sp), 730)
+for(loc in 1:length(stfdf@sp)) { # loc <- 1
+  cat("Location", loc, "\n")
+  res[loc,!is.na(target[loc, 1:730])[,"PM10"]] <- krigeST(PM10~1,
+                                                                                                                 data=stfdf[(1:length(stfdf@sp))[-loc],], 
+                                  newdata=stfdf[loc, 1:730, drop=F], 
+                                  fitsumMetricModel, lambda = 0.3838384,
+                                  stAni=linStAnisotropia)$var1.pred
+}
+
+stfdf@data$sumMetricModelAll <- as.vector(res)[!is.na(as.vector(res))]
+
+# 50 neighbours
+res <- matrix(NA, length(stfdf@sp), 730)
+for(loc in 1:length(stfdf@sp)) { # loc <- 1
+  cat("Location", loc, "\n")
+  res[loc,!is.na(target[loc, 1:730])[,"PM10"]] <- krigeST(PM10~1,
+                                                                                                                 data=stfdf[(1:length(stfdf@sp))[-loc],], 
+                                  newdata=stfdf[loc, 1:730, drop=F], 
+                                  fitsumMetricModel, nmax=50,lambda = 0.3838384,
+                                  stAni=linStAnisotropia)$var1.pred
+}
+
+stfdf@data$sumMetricModel50Nghbr <- as.vector(res)[!is.na(as.vector(res))]
+```
+
+
+```{r}
+## cross-validation
+#var2 di default pm10, colonna originale
+crossStat <- function(var1, var2="PM10", STxDF=stfdf, digits=NA) {
+  
+  diff <- STxDF[,,var1,drop=F]@data[[1]] - STxDF[,,var2,drop=F]@data[[1]]
+  RMSE <- sqrt(mean(diff^2))
+  MAE <- mean(abs(diff))
+  ME <- mean(diff)
+  COR <- cor(STxDF[,,var1,drop=F]@data[[1]], STxDF[,,var2,drop=F]@data[[1]])
+    y_osservato <- STxDF[,,var2,drop=F]@data[[1]] # Valori reali
+  y_predetto <- STxDF[,,var1,drop=F]@data[[1]] # Valori stimati
+cat(cor(y_osservato, y_predetto, use="complete.obs"), "\n")
+R1 <- 1 - (sum((y_osservato - y_predetto)^2, na.rm=TRUE) /
+           sum((y_osservato - mean(y_osservato, na.rm=TRUE))^2, na.rm=TRUE))
+cat(R1, "\n")
+# Calcolo dell'R^2
+SSE <- sum((y_osservato - y_predetto)^2)
+TSS <- sum((y_osservato - mean(y_osservato))^2)
+cat("SSE:", SSE, "TSS:", TSS, "\n")
+R2 <- 1 - (SSE / TSS)
+  res <- c(RMSE, MAE, ME, COR, R2)
+  names(res) <- c("RMSE", "MAE", "ME", "COR", "R2")
+  if(is.na(digits))
+    return(res)
+  else
+    return(round(res, digits))
+}
+```
+
+
+
+
+```{r}
+rbind(
+crossStat("sepModel10Nghbr", digits=2),
+crossStat("sepModel50Nghbr", digits=2),
+crossStat("sepModelAll", digits=2),
+
+crossStat("productsumModel10Nghbr", digits=2),
+crossStat("productsumModel50Nghbr", digits=2),
+crossStat("productsumModelAll", digits=2),
+
+crossStat("metricModel10Nghbr", digits=2),
+crossStat("metricModel50Nghbr", digits=2),
+crossStat("metricModelAll", digits=2),
+
+crossStat("sumMetricModel10Nghbr", digits=2),
+crossStat("sumMetricModel50Nghbr", digits=2),
+crossStat("sumMetricModelAll", digits=2))
+
+#RMSE   MAE   ME  COR        n   R2                           Wmse
+#[1,] 17.13 12.47 5.25 0.46  20   -0.01   sepModel10Nghbr        95.0759 Exp_Sph
+#[2,] 17.05 12.96 5.29 0.41  50   0.00  sepModel50Nghbr        95.0759 Exp_Sph 
+#[3,] 17.40 12.22 5.29 0.48  20   -0.04  productsumModel10Nghbr 95.65461 Sph_Sph 
+#[4,] 16.81 12.35 5.27 0.46  50   0.03  productsumModel50Nghbr  95.65461 Sph_Sph 
+#[5,] 17.40 12.22 5.29 0.48  20   -0.04  metricModel10Nghbr      26.92628 Exp
+#[6,] 17.09 12.12 5.28 0.49  50    0.00 metricModel50Nghbr      26.92628 Exp
+#[7,] 17.39 12.21 5.29 0.48  20   -0.04  sumMetricModel10Nghbr   16.20122 #Exp_Gau_Sph 
+#[8,] 16.76 12.09 5.27 0.48  50   0.04 sumMetricModel50Nghbr   16.20122 #Exp_Gau_Sph 
+```
+
+
+
+
+```{r}
+library(reshape)
+library(zoo)
+```
+
+```{r}
+loc <- "32399" # Numero della stazione per cui creare il grafico
+tw <- index(stfdf@time)[index(stfdf@time) >= "2022-01-15" & index(stfdf@time) <= "2022-04-15"]
+df4 <- data.frame(
+  Date = as.Date(tw),
+  Observed = as.numeric(stfdf[6, tw][, "PM10"]),
+  Pred10 = as.numeric(stfdf[6, tw][, "productsumModel10Nghbr"]),
+  Pred50 = as.numeric(stfdf[6, tw][, "productsumModel50Nghbr"])
+)
+
+# Converti in formato long per ggplot
+df_lon <- melt(df4, id.vars = "Date")
+
+ggplot(df_lon, aes(x = Date, y = value, color = variable, linetype = variable, size = variable)) +
+  geom_line() +  # Linee per le due serie
+  labs(title = paste("Location", stfdf@sp@data$Station[6]),
+       x = "Date", y = "PM10 Levels") +
+  scale_x_date(date_labels = "%Y-%m-%d", date_breaks = "15 days", expand = expansion(mult = c(0.07, 0.07))) +
+  scale_color_manual(values = c("Observed" = "darkgreen", "Pred10" = "black", "Pred50" = "coral" )) + # Colore più chiaro
+  scale_linetype_manual(values = c("Observed" = "solid", "Pred10" = "solid", "Pred50" = "solid")) +  # Linee solide
+  scale_size_manual(values = c("Observed" = 0.6, "Pred10" = 0.75,"Pred50" = 0.75)) +  # "Observed" più sottile
+  theme_minimal() +  
+  theme(legend.title = element_blank(), 
+        legend.position = c(0.35, 0.95), legend.direction= "horizontal")
+```
+
+
+
+
+
+
+```{r}
+
+smplDays <- c(15, 118, 179, 195, 229, 244 ,299, 306)
+formatted_dates <- format(as.Date(index(stfdf@time[smplDays])), "%Y-%m-%d")
+# Calcola la differenza tra le predizioni e i dati osservati
+stfdf@data$diffPM10 <- stfdf@data$sumMetricModel50Nghbr - stfdf@data$PM10
+
+# Crea un grafico spazio-temporale per visualizzare le differenze giornaliere
+bbox_punti <- bbox(stfdf@sp)
+xlim <- bbox_punti[1, ] + c(-3000, 3000)  # Adatta lo zoom sulla X
+ylim <- bbox_punti[2, ] + c(-3000,3000) 
+
+formatted_dates <- format(index(stfdf@time[smplDays]), "%Y-%m-%d")
+# Crea un grafico spazio-temporale con zoom ridotto
+stpl <- stplot(
+  as(stfdf[, smplDays, "diffPM10"], "STFDF"),  # Conversione in formato STFDF
+  col.regions = bpy.colors(7),  # Colori della scala
+  sp.layout = list("sp.polygons", milano),  # Layout spaziale con confini
+ xlim = xlim, ylim = ylim,
+  scales = list(draw = FALSE,labels = formatted_dates),  # Nessuna scala sugli assi
+  key.space = "right",  # Posizione della legenda
+  colorkey = TRUE,  # Aggiunge una legenda dei colori
+  cuts = c(-35, -25, -15, -5, 5, 15, 25, + 35),  # Intervalli di valore per le differenze
+  main = NULL  # Nessun titolo
+)
+names(dimnames(stpl)) <- formatted_dates
+
+```
+
+        
+
+
+# universal kriging
+
+
+
+
+
+
+
+```{r}
+df1 <- read_csv("C:/Users/samir/Downloads/dati_tesi/dataset_trainV.csv",show_col_types = FALSE, )  %>% dplyr::select(-ZoneType ,-StationType ,-Altitude, -Source, -unique_id, -Long, -Lat, -season) %>% mutate(date = as.Date(date)) %>%
+  rename(DatetimeBegin = date,
+         Station= StationName)
+df <- df %>% dplyr::select("DatetimeBegin", "Station","PM10", "lag1", "lag7","day_of_month","season","month","day_of_year","Lat","Long","ZoneType","StationType","Altitude","Source") %>%  left_join(df1, by= c("DatetimeBegin", "Station" ) )
+```
+
+
+
+```{r}
+df_land <- read_csv("C:/Users/samir/Downloads/dati_tesi/landcov_sums.csv",show_col_types = FALSE ) 
+df_land<- pivot_wider(df_land, names_from = landcov, values_from = total_sum, id_cols= StationName, values_fill= list(total_sum=0)) %>% rename(Station = StationName) 
+  
+```
+
+
+
+```{r}
+df <- df %>% left_join(df_land, by = "Station")  %>% rename (Continuous_urban_fabric= "Continuous urban fabric",
+            Discontinuous_urban_fabric ="Discontinuous urban fabric",
+            Industrial_commercial_units= "Industrial or commercial units",
+            Road_Rail = "Road and rail networks and associated land",
+            Non_irrigated_arable_land ="Non-irrigated arable land",
+            Green_urban_areas= "Green urban areas")
+```
+
+
+
+
+```{r}
+df <- read_csv("C:/Users/samir/Downloads/dati_tesi/df_totale.csv",show_col_types = FALSE ) %>%
+  dplyr::select(-"Continuous_urban_fabric" ,-"Discontinuous_urban_fabric" ,-"Industrial_or_commercial_units" ,-"Road_and_rail_networks_and_associated_land",-"Non-irrigated_arable_land" ,-"Green_urban_areas"   )  %>% left_join(df_land, by = "Station")  %>% rename (Continuous_urban_fabric= "Continuous urban fabric",
+            Discontinuous_urban_fabric ="Discontinuous urban fabric",
+            Industrial_commercial_units= "Industrial or commercial units",
+            Road_Rail = "Road and rail networks and associated land",
+            Non_irrigated_arable_land ="Non-irrigated arable land",
+            Green_urban_areas= "Green urban areas")
+```
+
+```{r}
+df <- df%>%
+  dplyr::select(-"Continuous_urban_fabric" ,-"Discontinuous_urban_fabric" ,-"Industrial_or_commercial_units" ,-"Road_and_rail_networks_and_associated_land",-"Non-irrigated_arable_land" ,-"Green_urban_areas"   )  %>% left_join(df_land, by = "Station")  %>% rename (Continuous_urban_fabric= "Continuous urban fabric",
+            Discontinuous_urban_fabric ="Discontinuous urban fabric",
+            Industrial_commercial_units= "Industrial or commercial units",
+            Road_Rail = "Road and rail networks and associated land",
+            Non_irrigated_arable_land ="Non-irrigated arable land",
+            Green_urban_areas= "Green urban areas")
+```
+
+
+
+
+
+
+```{r}
+#######prova
+
+df_iqr <- df %>%
+  group_by(Source) %>%
+  summarize(
+    Q1 = quantile(PM10, 0.25, na.rm = TRUE),
+    Q3 = quantile(PM10, 0.75, na.rm = TRUE),
+    IQR_value = Q3 - Q1,
+    lower_bound = Q1 - 1.5 * IQR_value,
+    upper_bound = Q3 + 1.5 * IQR_value
+  )
+
+df <- df %>%
+  left_join(df_iqr, by = "Source") %>%
+  mutate(
+    PM10 = pmax(pmin(PM10, upper_bound), lower_bound)  # Sostituisce outlier
+  ) %>% dplyr::select(-Q1, -Q3, -IQR_value, -lower_bound, -upper_bound)
+
+
+df <-   df %>%  mutate(
+    Source = factor(Source),
+    season = factor(season))
+
+```
+
+
+```{r}
+covariates <- df[,c(  "Temp", "Umidit", "VelVentoMedia", "Rad" ,"Source","StationType", "u_media","v_media", "DirezioneMedia",  "day_of_year","Continuous_urban_fabric", "Discontinuous_urban_fabric",
+  "season","day_of_month","lag1", "lag7","month")]
+#+ Temp +u_media + v_media +Umidit+ lag1 +VelVentoMedia + season+ Rad + lag7 + Continuous_urban_fabric +Discontinuous_urban_fabric 
+```
+
+
+
+
+
+```{r}
+########################
+##############################PROVAAAAAAAAAAAAAA
+
+covariates <- datas[,c(  "Temp", "Umidit", "VelVentoMedia", "Source", "u_media","v_media",  "day_of_year","Continuous_urban_fabric",
+  "season","lag1", "lag7","month")]
+
+datas$DatetimeBegin <- as.POSIXct(datas$DatetimeBegin, format = "%Y-%m-%d")
+datas <- datas[order(datas$Station, datas$DatetimeBegin), ]
+# Crea oggetto SpatialPoints con CRS EPSG:4326 (lat/lon)
+stations <- unique(datas[, c("Lat", "Long", "Station")])
+sp::coordinates(stations) <- ~ Long + Lat
+sp::proj4string(stations) <- sp::CRS("+init=epsg:4326")  # Sistema originale (lat/lon)
+
+# Trasforma in EPSG:3035 (proiezione metrica)
+stations <- sp::spTransform(stations, sp::CRS("+init=epsg:3035"))
+
+# Definisci la sequenza temporale
+
+
+# time_seq <- seq(
+#   from = as.POSIXct("2022-01-01"),
+#   to = as.POSIXct("2023-12-31"),
+#   by = "day"
+# )
+
+
+ time_seq <- as.POSIXct(c("2022-09-18", "2023-08-07", "2023-11-26", "2023-12-02", "2023-12-22", "2023-03-27", "2023-07-26", "2023-08-06", "2022-04-09", "2022-07-07", "2022-07-10", "2022-08-12", "2022-09-17", "2023-03-28", "2023-11-25"), tz = "CET") %>%  sort()
+#covariates <- df_scaled[, c( "maxRad", "Temp", "Umidit", "maxUmidit", "Prec","VelVentoMedia", 
+#  "u_media","v_media", "DirezioneMedia", "Source", "Continuous_urban_fabric", 
+#  "Discontinuous_urban_fabric", "Industrial_or_commercial_units", 
+#  "Road_and_rail_networks_and_associated_land","Non_irrigated_arable_land",
+#  "season","day_of_month","lag1",   
+#"Temp_season")]
+
+data_stfdf <- data.frame(
+  PM10 =  datas$PM10 
+  ,covariates  # Tutte le variabili trasformate
+)
+
+# Creiamo l'oggetto `STFDF`
+stfdf_uk <- spacetime::STFDF(
+  sp = stations,  # Coordinate delle stazioni
+  time = time_seq,  # Sequenza temporale
+  data = data_stfdf  # Dataset con PM10 + covariate
+)
+```
+
+
+
+
+```{r}
+df$DatetimeBegin <- as.POSIXct(df$DatetimeBegin, format = "%Y-%m-%d")
+df <- df[order(df$Station, df$DatetimeBegin), ]
+# Crea oggetto SpatialPoints con CRS EPSG:4326 (lat/lon)
+stations <- unique(df[, c("Lat", "Long", "Station")])
+sp::coordinates(stations) <- ~ Long + Lat
+sp::proj4string(stations) <- sp::CRS("+init=epsg:4326")  # Sistema originale (lat/lon)
+
+# Trasforma in EPSG:3035 (proiezione metrica)
+stations <- sp::spTransform(stations, sp::CRS("+init=epsg:3035"))
+
+# Definisci la sequenza temporale
+time_seq <- seq(
+  from = as.POSIXct("2022-01-01"),
+  to = as.POSIXct("2023-12-31"),
+  by = "day"
+)
+#covariates <- df_scaled[, c( "maxRad", "Temp", "Umidit", "maxUmidit", "Prec","VelVentoMedia", 
+#  "u_media","v_media", "DirezioneMedia", "Source", "Continuous_urban_fabric", 
+#  "Discontinuous_urban_fabric", "Industrial_or_commercial_units", 
+#  "Road_and_rail_networks_and_associated_land","Non_irrigated_arable_land",
+#  "season","day_of_month","lag1",   
+#"Temp_season")]
+
+data_stfdf <- data.frame(
+  PM10 =  df$PM10 
+  ,covariates  # Tutte le variabili trasformate
+)
+
+# Creiamo l'oggetto `STFDF`
+stfdf_uk <- spacetime::STFDF(
+  sp = stations,  # Coordinate delle stazioni
+  time = time_seq,  # Sequenza temporale
+  data = data_stfdf  # Dataset con PM10 + covariate
+)
+
+```
+
+```{r}
+stfdf_uk@sp
+```
+
+
+```{r}
+lambda <- 0.3838384
+stfdf_uk@data$PM10_trans <- (stfdf_uk@data$PM10^lambda - 1) / lambda
+#semivariogramma empirico
+formula_kriging <- PM10 ~ 1- Temp+Umidit+VelVentoMedia+Source+u_media+v_media+ season+lag1+lag7+month+Continuous_urban_fabric+ season
+#Discontinuous_urban_fabric
+# Creazione del variogramma empirico per Universal Kriging
+st_variogram_uk <- variogramST(
+  formula = formula_kriging,  
+  data = stfdf_uk,          
+  tlags = 0:3,           
+  cutoff = 4356.324,    
+  width = 1000,        
+  assumeRegular = TRUE   
+) 
+```
+
+```{r}
+plot(st_variogram_uk) 
+plot(st_variogram_uk,map=F) 
+plot(st_variogram_uk,wireframe=T) 
+```
+
+```{r}
+###sill si basa su gamma
+#il plateu empirico viene raggiunto a 84 
+#lower_sill 42 (0.5 *)
+#upper_sill 169 (2 *)
+###range si basa s dist
+# max(ep_variogram[ep_variogram$timelag == 0, "dist"])
+#range_spaziale_max = 3559.229             #3.56
+#lower_range_spaziale = 1779.614 (0.5 *)   #1.78
+#upper_range_spaziale =  7118.458  (2 *)   #7.12
+###range temporale si basa su timelag
+#max(ep_variogram[ep_variogram$spacelag == 0, "timelag"])
+#range_temporale_max 3
+#lower_range_temporale = 1
+#upper_range_temporale = 6
+#nugget si basa su gamma
+#nugget_empirico = 77.87708 valore minimo di gamma a lag zero
+#lower_nugget <- 0
+#upper_nugget <- 100.0947
+```
+
+
+
+
+```{r}
+spatial_df <- df %>% dplyr::select(Station, Lat, Long,PM10)
+coordinates(spatial_df) <- ~ Long + Lat
+proj4string(spatial_df) <- CRS("+init=epsg:4326")
+spatialDF <- spTransform(spatial_df, CRS("+init=epsg:3035"))
+
+
+
+
+temporal_df <- df %>% dplyr::select(Station, PM10, DatetimeBegin)
+
+vgm_s <- variogram(PM10 ~ 1,
+                   data   = spatialDF,
+                   cutoff = 4356.324,   # max dist considerata
+                   width  = 1000) 
+
+
+cat("plateau_sp/sill_tot: ",mean(vgm_s$gamma[((nrow(vgm_s))-4+1):(nrow(vgm_s))]), "\n")
+cat("nugget: ",mean(vgm_s$gamma[1]),"\n")
+cat("Partial sill: ",mean( vgm_s$gamma[(nrow(vgm_s) - 4 + 1):nrow(vgm_s)]) - mean(vgm_s$gamma[1]),"\n")
+cat("range: ",1482.788)
+cat("lower bounds:\n", "sill ", 0.5*245.5679,"nugget ",0,"range"  ,0.5*1482.788,"\n")
+cat("upper bounds:\n", "sill ", 2*245.5679 ,"nugget ",1.2* mean(vgm_s$gamma[1]),"range"  ,2*1482.788,"\n")
+
+
+temporal_df <- df %>% dplyr::select(Station, Lat, Long,PM10,DatetimeBegin)
+coordinates(temporal_df) <- ~ Long + Lat
+proj4string(temporal_df) <- CRS("+init=epsg:4326")
+temporal_df <- spTransform(temporal_df, CRS("+init=epsg:3035"))
+# vgm_t <- variogramST(PM10 ~ 1,
+#                    data   = temporal_df,
+#                    tlags  = 0:6) 
+
+cat("\n plateau_tm/sill_tot: ",mean(vgm_t$gamma[((nrow(vgm_t))-3+1):(nrow(vgm_t))]), "\n")
+cat("nugget: ",mean(vgm_t$gamma[1]),"\n")
+cat("Partial sill: ",mean( vgm_t$gamma[(nrow(vgm_t) - 3 + 1):nrow(vgm_t)]) - mean(vgm_t$gamma[1]),"\n")
+
+cat("lower bounds:\n", "sill ", 0.5*233.2863,"nugget ",0,"range"  ,0.5*1482.788,"\n")
+cat("upper bounds:\n", "sill ", 2*233.2863 ,"nugget ",1.2* mean(vgm_t$gamma[1]),"range"  ,2*1482.788)
+cat("range: ",1482.788)
+
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+```{r}
+linStAnisotropia_uk <- estiStAni(
+    st_variogram_uk,
+    interval = c(0, 200000)  # Range per la stima dell'anisotropia
+)
+linStAnisotropia_uk
+```
+
+```{r}
+st_variogram_uk$dist  <- st_variogram_uk$dist/1000
+st_variogram_uk$avgDist  <-st_variogram_uk$avgDist/1000
+st_variogram_uk$spacelag <- st_variogram_uk$spacelag/1000
+linStAnisotropia_uk <- linStAnisotropia_uk/1000
+```
+
+```{r}
+linStAnisotropia_uk
+```
+
+
+
+```{r}
+st_variogram_uk[which.min(h_bins)]
+```
+
+
+
+
+
+
+
+The log transformation is a common choice to stabilize variance and make the relationship between variables more linear.The Box-Cox transformation is more general than the log transformation. It includes the log transformation as a special case when λ=0. The optimal λ is chosen to maximize the log-likelihood, providing a data-driven approach to transformation.
+Compute a linear model with the lm function and pass it to the boxcox function as shown below in order to determine the appropriate “lambda”
+
+
+
+```{r}
+plot(density(df_filtered$Industrial_or_commercial_units))
+```
+
+```{r}
+boxplot(Industrial_or_commercial_units, data = df)
+```
+
+```{r}
+cor(df$Rad, df$Umidit, use = "complete.obs")
+```
+
+
+```{r}
+boxplot(VelVentoMedia ~ month, data = df)
+```
+
+```{r}
+
+vif(lm(PM10 ~ Temp + u_media + v_media + Umidit + VelVentoMedia + season + Rad + lag7 + lag1 + lag1:StationType, data = stfdf_uk@data))
+
+```
+
+
+
+```{r}
+df_cor <- df %>%
+  dplyr::select("PM10", "Temp"  ,  "Rad" ,"maxRad",  "Umidit" , "maxUmidit","minUmidit" ,   "Prec", "maxPrec" ,  "VelVentoMedia",  "VelVentoMax" ,   "u_media" , "v_media" ,"DirezioneMedia", "season","Continuous_urban_fabric", "Discontinuous_urban_fabric")  # Sostituisci con i nomi delle tue variabili
+
+# Calcola la matrice di correlazione
+cor_matrix <- cor(df_cor, use = "complete.obs")
+cor_matrix
+```
+
+
+
+
+```{r}
+boxplot(lag7~ StationType , data = df)
+```
+
+
+```{r}
+
+```
+
+
+
+
+
+
+
+rimuovere l’intercetta può creare problemi quando hai variabili categoriche, come season o month, perché cambia il modo in cui il modello gestisce le categorie.
+
+
+
+
+
+```{r}
+modello_sep <- function() {
+models <- list(
+  Exp_Exp = vgmST("separable", space = vgm(0.6, "Exp", 91, 0.4), time = vgm(0.6, "Exp", 3, 0.5), sill = 20),
+  Exp_Sph = vgmST("separable", space = vgm(0.6, "Exp", 91, 0.4), time = vgm(0.6, "Sph", 3, 0.5), sill = 20),
+  Sph_Sph = vgmST("separable", space = vgm(0.6, "Sph", 91, 0.4), time = vgm(0.6, "Sph", 3, 0.5), sill = 200),
+  Sph_Exp = vgmST("separable", space = vgm(0.6, "Sph", 91, 0.4), time = vgm(0.6, "Exp", 3, 0.5), sill = 200),
+  Sph_Gau = vgmST("separable", space = vgm(0.6, "Sph", 91, 0.4), time = vgm(0.6, "Gau", 3, 0.5), sill = 200),
+  Gau_Sph = vgmST("separable", space = vgm(0.6, "Gau", 91, 0.4), time = vgm(0.6, "Sph", 3, 0.5), sill = 200),
+  Gau_Exp = vgmST("separable", space = vgm(0.6, "Gau", 91, 0.4), time = vgm(0.6, "Exp", 3, 0.5), sill = 200),
+  Exp_Gau = vgmST("separable", space = vgm(0.6, "Exp", 91, 0.4), time = vgm(0.6, "Gau", 3, 0.5), sill = 200),
+  Gau_Gau = vgmST("separable", space = vgm(0.6, "Gau", 91, 0.4), time = vgm(0.6, "Gau", 3, 0.5), sill = 200)
+  )
+
+modellist <- list()
+for (model_name in names(models)) {
+  fit <- fit.StVariogram(
+    st_variogram_uk,
+    models[[model_name]],
+    fit.method = 6,
+    stAni = linStAnisotropia_uk,
+    method = "L-BFGS-B",
+    control = list(parscale = c(10, 1, 10, 1, 100)),
+    lower = c(0.1, 0, 3, 0, 1),  ## Lb: sill, nugget, range sp, nugget temp, range temp 
+    upper = c(100, 10, 10, 10, 10))  ## up: sill, nugget, range sp, nugget temp, range temp 
+# Crea data frame per space  
+  space_df <- data.frame(partial_sill = round(fit$space[2,2],2), model = fit$space[2,1],  range= paste(fit$space[2,3], "km"), nugget = fit$space[1,2], sp_temp.sill = fit$sill )
+  
+  time_df <- data.frame(partial_sill = round(fit$time[2, 2],2),  model = fit$time[2, 1], range = paste(round(fit$time[2, 3],2), "days"), nugget = round(fit$time[1, 2],2), sp_temp.sill = fit$sill)
+  modellist[[model_name]] <- list(
+    optim.output = attr(fit, "optim.output")$value,
+    MSE = attr(fit, "MSE"),
+    fit_table = rbind(space_df, time_df),
+    fit= fit)
+   
+}  
+
+best_model_name <- names(modellist)[which.min(sapply(modellist, function(model) model$MSE))]
+bestModel <- modellist[[best_model_name]] 
+cat(best_model_name,"\n")
+cat("MSE: ", bestModel$MSE,"\n")
+cat("optim.output: ", bestModel$optim.output)
+return(list(
+  bestModel= bestModel,
+  t_modelli=modellist))
+}
+```
+
+```{r}
+mod_sep <- modello_sep()
+
+#Exp_Exp 
+#MSE:  1068.964 
+#optim.output:  1068.964
+
+##newww
+# Sph_Exp 
+# MSE:  1.958019 
+# optim.output:  1.958019
+```
+
+```{r}
+mod_sep$bestModel$fit_table
+```
+
+```{r}
+modello_sep <-   vgmST("separable", space = vgm(0.6, "Gau", 91, 0.4), time = vgm(0.6, "Gau", 3, 0.5), sill = 200)
+
+fitsepModel <-  fit.StVariogram(
+    st_variogram_uk,
+    modello_sep,
+    fit.method = 6,
+    stAni = linStAnisotropia_uk,
+    method = "L-BFGS-B",
+    control = list(parscale = c(10, 1, 10, 1, 100)),
+    lower = c(50, 0, 3, 0, 1)  ## Lb: sill, nugget, range sp, nugget temp, range temp 
+    
+  ) 
+```
+
+```{r}
+cat("MSE: ", fitsepModel$MSE,"\n")
+cat("optim.output: ", fitsepModel$optim.output)
+```
+```{r}
+fitsepModel
+```
+
+
+
+```{r}
+modello_productSum <- function() {
+models <- list(
+  Exp_Exp = vgmST("productSum", space = vgm(0.123, "Exp", 80, 0.08), time = vgm(12, "Exp", 1.5, 2), k = 50),
+  Exp_Sph = vgmST("productSum", space = vgm(0.123, "Exp", 80, 0.08), time = vgm(12, "Sph", 1.5, 2), k = 50),
+  Sph_Sph = vgmST("productSum", space = vgm(0.123, "Sph", 80, 0.08), time = vgm(12, "Sph", 1.5, 2), k = 50),
+  Sph_Exp = vgmST("productSum", space = vgm(0.123, "Sph", 80, 0.08), time = vgm(12, "Exp", 1.5, 2), k = 50),
+  Sph_Gau = vgmST("productSum", space = vgm(0.123, "Sph", 80, 0.08), time = vgm(12, "Gau", 1.5, 2), k = 50),
+  Gau_Sph = vgmST("productSum", space = vgm(0.123, "Gau", 80, 0.08), time = vgm(12, "Sph", 1.5, 2), k = 50),
+  Gau_Exp = vgmST("productSum", space = vgm(0.123, "Gau", 80, 0.08), time = vgm(12, "Exp", 1.5, 2), k = 50),
+  Exp_Gau = vgmST("productSum", space = vgm(0.123, "Exp", 80, 0.08), time = vgm(12, "Gau", 1.5, 2), k = 50),
+  Gau_Gau = vgmST("productSum", space = vgm(0.123, "Gau", 80, 0.08), time = vgm(12, "Gau", 1.5, 2), k = 50)
+  )
+
+modellist <- list()
+for (model_name in names(models)) {
+  fit <- fit.StVariogram(
+    st_variogram_uk,
+    models[[model_name]],
+    fit.method = 6,
+    stAni = linStAnisotropia_uk,
+    method = "L-BFGS-B",
+    lower = c(0.01, 0.1, 10, 0.5, 0.5),  ## Soglie più sicure
+    upper = c(200, 1,20, 5, 50), ## up: sill, nugget, range sp, nugget temp, range temp 
+    control = list(parscale = c(0.1, 0.5, 100, 10, 5, 1, 10)))
+   
+    #lower = c(50, 0, 3, 0, 10),  ## Lb: sill, nugget, range sp, nugget temp, range temp 
+   # upper = c(100, 1, 10, 1, 200))  ## up: sill, nugget, range sp, nugget temp, range temp     
+# Crea data frame per space  
+  space_df <- data.frame(partial_sill = round(fit$space[2,2],2), model = fit$space[2,1],  range= paste(fit$space[2,3], "km"), nugget = fit$space[1,2], sp_temp.k = fit$k )
+  
+  time_df <- data.frame(partial_sill = round(fit$time[2, 2],2),  model = fit$time[2, 1], range = paste(round(fit$time[2, 3],2), "days"), nugget = round(fit$time[1, 2],2), sp_temp.k = fit$k)
+  modellist[[model_name]] <- list(
+    optim.output = attr(fit, "optim.output")$value,
+    MSE = attr(fit, "MSE"),
+    fit_table = rbind(space_df, time_df),
+    fit= fit)
+   
+}  
+
+best_model_name <- names(modellist)[which.min(sapply(modellist, function(model) model$MSE))]
+bestModel <- modellist[[best_model_name]] 
+cat(best_model_name,"\n")
+cat("MSE: ", bestModel$MSE,"\n")
+cat("optim.output: ", bestModel$optim.output)
+return(list(
+  bestModel= bestModel,
+  t_modelli=modellist))
+}
+```
+
+
+```{r}
+mod_productSum <- modello_productSum()
+#Gau_Sph 
+#MSE:  25.34525 
+#optim.output:  25.34525
+```
+
+
+```{r}
+mod_productSum$bestModel$fit_table 
+```
+
+
+```{r}
+modello_metric <- function() {
+models <- list(
+  Exp = vgmST("metric", "Exp", joint = vgm(80, "Exp",4, 10 ),stAni = linStAnisotropia_uk),
+  Sph = vgmST("metric", "Sph", joint = vgm(80, "Exp",4, 10 ),stAni = linStAnisotropia_uk),
+  Gau = vgmST("metric","Gau", joint = vgm(80, "Exp",4, 10 ),stAni = linStAnisotropia_uk)
+  )
+
+modellist <- list()
+for (model_name in names(models)) {
+  fit <- fit.StVariogram(
+    st_variogram_uk,
+    models[[model_name]],
+    fit.method = 6,
+    stAni = linStAnisotropia_uk,
+    method = "L-BFGS-B", 
+    control = list(parscale = c(10,1,5,10)),
+     lower = c(1, 0.1, 2, 0.1, 1),  ## Lb: sill, nugget, range sp, nugget temp, range temp 
+    upper = c(100, 0.5, 40, 1, 20))
+   
+     ## up: sill, nugget, range sp, nugget temp, range temp     
+# Crea data frame per space  
+  fit_table <-fit$joint
+  fit_table$sp_temp.stAni <- NA  # Imposta tutte le righe a NA
+  fit_table$sp_temp.stAni[1] <- fit$stAni
+  modellist[[model_name]] <- list(
+    fit_table = fit_table,
+    optim.output = attr(fit, "optim.output")$value,
+    MSE = attr(fit, "MSE"),
+    fit= fit)
+   
+}  
+
+best_model_name <- names(modellist)[which.min(sapply(modellist, function(model) model$MSE))]
+bestModel <- modellist[[best_model_name]] 
+cat(best_model_name,"\n")
+cat("MSE: ", bestModel$MSE,"\n")
+cat("optim.output: ", bestModel$optim.output)
+return(list(
+  bestModel= bestModel,
+  t_modelli=modellist))
+}
+```
+
+
+```{r}
+mod_metric <- modello_metric()
+#Exp 
+#MSE:  4.178407 
+#optim.output:  4.178407
+```
+
+
+```{r}
+mod_metric$bestModel$fit_table
+```
+
+
+```{r}
+mod_metric$bestModel
+```
+
+
+```{r}
+modello_sumMetric <- function() {
+models <- list(
+Exp_Exp_Exp = vgmST("sumMetric", space = vgm(10, "Exp", 40, 0.2), time = vgm(100, "Exp", 4, 8),
+  joint = vgm(10, "Exp", 3000, 90), stAni = linStAnisotropia_uk),
+Exp_Sph_Exp = vgmST("sumMetric", space = vgm(10, "Exp", 40, 0.2), time = vgm(100, "Sph", 4, 8),
+                        joint = vgm(10, "Exp", 3000, 90), stAni = linStAnisotropia_uk),
+Exp_Sph_Sph = vgmST("sumMetric", space = vgm(10, "Exp", 40, 0.2), time = vgm(100, "Sph", 4, 8),
+                        joint = vgm(10, "Sph", 3000, 90), stAni = linStAnisotropia_uk),
+Exp_Exp_Sph = vgmST("sumMetric", space = vgm(10, "Exp", 40, 0.2), time = vgm(100, "Exp", 4, 8),
+                        joint = vgm(10, "Sph", 3000, 90), stAni = linStAnisotropia_uk),
+Exp_Gau_Exp = vgmST("sumMetric", space = vgm(10, "Exp", 40, 0.2), time = vgm(100, "Gau", 4, 8),
+                        joint = vgm(10, "Exp", 3000, 90), stAni = linStAnisotropia_uk),
+Exp_Gau_Gau = vgmST("sumMetric", space = vgm(10, "Exp", 40, 0.2), time = vgm(100, "Gau", 4, 8),
+                        joint = vgm(10, "Gau", 3000, 90), stAni = linStAnisotropia_uk),
+Exp_Exp_Gau = vgmST("sumMetric", space = vgm(10, "Exp", 40, 0.2), time = vgm(100, "Exp", 4, 8),
+                        joint = vgm(10, "Gau", 3000, 90), stAni = linStAnisotropia_uk),
+Exp_Sph_Gau = vgmST("sumMetric", space = vgm(10, "Exp", 40, 0.2), time = vgm(100, "Sph", 4, 8),
+                        joint = vgm(10, "Gau", 3000, 90), stAni = linStAnisotropia_uk),
+Exp_Gau_Sph = vgmST("sumMetric", space = vgm(10, "Exp", 40, 0.2), time = vgm(100, "Gau", 4, 8),
+                        joint = vgm(10, "Sph", 3000, 90), stAni = linStAnisotropia_uk),
+
+Sph_Sph_Sph = vgmST("sumMetric", space = vgm(10, "Sph", 40, 0.2), time = vgm(100, "Sph", 4, 8),
+                     joint = vgm(10, "Sph", 3000, 90), stAni = linStAnisotropia_uk),
+Sph_Exp_Sph = vgmST("sumMetric", space = vgm(10, "Sph", 40, 0.2), time = vgm(100, "Exp", 4, 8),
+                     joint = vgm(10, "Sph", 3000, 90), stAni = linStAnisotropia_uk),
+Sph_Exp_Exp = vgmST("sumMetric", space = vgm(10, "Sph", 4000, 0.2), time = vgm(100, "Exp", 4, 8),
+                     joint = vgm(10, "Exp", 3000, 90), stAni = linStAnisotropia_uk),
+Sph_Sph_Exp = vgmST("sumMetric", space = vgm(10, "Sph", 40, 0.2), time = vgm(100, "Sph", 4, 8),
+                     joint = vgm(10, "Exp", 3000, 90), stAni = linStAnisotropia_uk),
+Sph_Gau_Sph = vgmST("sumMetric", space = vgm(10, "Sph", 40, 0.2), time = vgm(100, "Gau", 4, 8),
+                     joint = vgm(10, "Sph", 3000, 90), stAni =linStAnisotropia_uk),
+Sph_Gau_Gau = vgmST("sumMetric", space = vgm(10, "Sph", 40, 0.2), time = vgm(100, "Gau", 4, 8),
+                     joint = vgm(10, "Gau", 3000, 90), stAni = linStAnisotropia_uk),
+Sph_Sph_Gau = vgmST("sumMetric", space = vgm(10, "Sph", 40, 0.2), time = vgm(100, "Sph", 4, 8),
+                     joint = vgm(10, "Gau", 3000, 90), stAni = linStAnisotropia_uk),
+Sph_Exp_Gau = vgmST("sumMetric", space = vgm(10, "Sph", 40, 0.2), time = vgm(100, "Exp", 4, 8),
+                     joint = vgm(10, "Gau", 3000, 90), stAni = linStAnisotropia_uk),
+Sph_Gau_Exp = vgmST("sumMetric", space = vgm(10, "Sph", 40, 0.2), time = vgm(100, "Gau", 4, 8),
+                     joint = vgm(10, "Exp", 3000, 90), stAni = linStAnisotropia_uk),
+
+Gau_Gau_Gau = vgmST("sumMetric", space = vgm(10, "Gau", 40, 0.2), time = vgm(100, "Gau", 4, 8),
+                        joint = vgm(10, "Gau", 3000, 90), stAni = linStAnisotropia_uk),
+Gau_Exp_Gau = vgmST("sumMetric", space = vgm(10, "Gau", 40, 0.2), time = vgm(100, "Exp", 4, 8),
+                        joint = vgm(10, "Gau", 3000, 90), stAni = linStAnisotropia_uk),
+Gau_Exp_Exp = vgmST("sumMetric", space = vgm(10, "Gau", 40, 0.2), time = vgm(100, "Exp", 4, 8),
+                        joint = vgm(10, "Exp", 3000, 90), stAni = linStAnisotropia_uk),
+Gau_Gau_Exp = vgmST("sumMetric", space = vgm(10, "Gau", 40, 0.2), time = vgm(100, "Gau", 4, 8),
+                        joint = vgm(10, "Exp", 3000, 90), stAni = linStAnisotropia_uk),
+Gau_Sph_Gau = vgmST("sumMetric", space = vgm(10, "Gau", 40, 0.2), time = vgm(100, "Sph", 4, 8),
+                        joint = vgm(10, "Gau", 3000, 90), stAni = linStAnisotropia_uk),
+Gau_Sph_Sph = vgmST("sumMetric", space = vgm(10, "Gau", 40, 0.2), time = vgm(100, "Sph", 4, 8),
+                        joint = vgm(10, "Sph", 3000, 90), stAni = linStAnisotropia_uk),
+Gau_Gau_Sph = vgmST("sumMetric", space = vgm(10, "Gau", 40, 0.2), time = vgm(100, "Gau", 4, 8),
+                        joint = vgm(10, "Sph", 3000, 90), stAni =linStAnisotropia_uk),
+Gau_Exp_Sph = vgmST("sumMetric", space = vgm(10, "Gau", 40, 0.2), time = vgm(100, "Exp", 4, 8),
+                        joint = vgm(10, "Sph", 3000, 90), stAni = linStAnisotropia_uk),
+Gau_Sph_Exp = vgmST("sumMetric", space = vgm(10, "Gau", 40, 0.2), time = vgm(100, "Sph", 4, 8),
+                        joint = vgm(10, "Exp", 3000, 90), stAni =linStAnisotropia_uk)
+
+ )
+
+modellist <- list()
+for (model_name in names(models)) {
+ # cat("Fitting model:", model_name, "\n")  # Debugging
+  fit <- fit.StVariogram(st_variogram_uk, models[[model_name]], 
+                fit.method = 6, stAni=linStAnisotropia_uk,
+                 method = "L-BFGS-B", 
+                 lower = c(sill.s = 0.1,  range.s = 1,  nugget.s = 0.1,
+                           sill.t = 0.1,  range.t = 0.1,   nugget.t = 0.1,
+                           sill.st= 0.1, range.st = 10, nugget.st = 0.1, 
+                           anis = 400),
+                  upper = c(
+    sill.s = 500,  range.s = 50, nugget.s = 10,  
+    sill.t = 500,  range.t = 10,  nugget.t = 10,  
+    sill.st = 500, range.st = 500, nugget.st =100, 
+    anis = 2000
+  ),
+                 control = list(parscale = c(1,100,1,1,0.5,1,1,100,1,100),
+                               maxit=1e4))
+# Crea data frame per space  
+  space  <- data.frame(partial_sill = round(fit$space[2,2],2), model = fit$space[2,1],  range= paste(fit$space[2,3], "km"), nugget = fit$space[1,2], tipo = "space")
+  time  <- data.frame(partial_sill = round(fit$time[2,2],2), model = fit$time[2,1],  range= paste(fit$time[2,3], "km"), nugget = fit$time[1,2],tipo = "time")
+  joint  <- data.frame(partial_sill = round(fit$joint[2,2],2), model = fit$joint[2,1],  range= paste(fit$joint[2,3], "km"), nugget = fit$joint[1,2],tipo = "joint")
+
+  fit_table <-  rbind(space, time, joint)
+  fit_table$sp_temp_joint.stAni <- NA  # Imposta tutte le righe a NA
+  fit_table$sp_temp_joint.stAni[1] <- fit$stAni
+  
+  
+  
+  modellist[[model_name]] <- list(
+    optim.output = attr(fit, "optim.output")$value,
+    MSE = attr(fit, "MSE"),
+    fit_table = fit_table,
+    fit= fit)
+   
+}  
+
+best_model_name <- names(modellist)[which.min(sapply(modellist, function(model) model$MSE))]
+bestModel <- modellist[[best_model_name]] 
+cat(best_model_name,"\n")
+cat("MSE: ", bestModel$MSE,"\n")
+cat("optim.output: ", bestModel$optim.output)
+return(list(
+  bestModel= bestModel,
+  t_modelli=modellist))
+}
+
+#Exp_Gau_Sph 
+#MSE:  16.20122 
+#optim.output:  16.20122
+```
+
+
+```{r}
+mod_sumMetric <- modello_sumMetric() #3.668874
+```
+
+
+
+
+
+```{r}
+mod_sumMetric$bestModel$fit_table
+```
+
+
+# loocv
+
+```{r}
+####################################modello_sep#####################6
+modello_sep <-   vgmST("separable", space = vgm(0.6, "Gau", 91, 0.4), time = vgm(0.6, "Gau", 3, 0.5), sill = 200)
+
+fitsepModel <-  fit.StVariogram(
+    st_variogram_uk,
+    modello_sep,
+    fit.method = 6,
+    stAni = linStAnisotropia_uk,
+    method = "L-BFGS-B",
+    control = list(parscale = c(10, 1, 10, 1, 100)),
+    lower = c(50, 0, 3, 0, 1) ## Lb: sill, nugget, range sp, nugget temp, range temp 
+ #   upper = c(100, 1, 10, 1, 20)
+  ) 
+####################################modello_productSum#####################
+modello_productSum <-  vgmST("productSum", space = vgm(0.123, "Gau", 80, 0.08), time = vgm(12, "Sph", 1.5, 2), k = 50)
+
+fitproductSumModel <-  fit.StVariogram(
+    st_variogram_uk,
+    modello_productSum,
+    fit.method = 6,
+    stAni = linStAnisotropia_uk,
+    method = "L-BFGS-B",
+    lower = c(0.01, 0.1, 10, 0.5, 0.5),  ## Soglie più sicure
+    upper = c(200, 1,20, 5, 50),
+    control = list(parscale = c(0.1, 0.5, 100, 10, 5, 1, 10)))
+####################################modello_metric#####################
+modello_metric <- vgmST("metric", "Gau", joint = vgm(80, "Sph",4, 10 ),stAni = linStAnisotropia_uk)
+
+fitmetricModel <-  fit.StVariogram(
+    st_variogram_uk,
+    modello_metric ,
+    fit.method = 6,
+    stAni = linStAnisotropia_uk,
+    method = "L-BFGS-B", 
+    lower = c(1, 0.1, 2, 0.1, 1),  ## Lb: sill, nugget, range sp, nugget temp, range temp 
+    upper = c(100, 0.5, 40, 1, 20),
+    control = list(parscale = c(10,20,5,10)))
+####################################modello_sumMetric#####################
+modello_sumMetric <-vgmST("sumMetric", space = vgm(10, "Gau", 40, 0.2), time = vgm(100, "Gau", 4, 8),
+                        joint = vgm(10, "Gau", 3000, 90), stAni = linStAnisotropia_uk)
+
+fitsumMetricModel <- fit.StVariogram(st_variogram_uk,modello_sumMetric , 
+                fit.method = 6, stAni=linStAnisotropia_uk,
+                 method = "L-BFGS-B", 
+                 lower = c(sill.s = 0.1,  range.s = 10,  nugget.s = 0.1,
+                           sill.t = 0.1,  range.t = 0.1,   nugget.t = 0.1,
+                           sill.st= 0.1, range.st = 10, nugget.st = 0.1, 
+                           anis = 400),
+                             upper = c(
+    sill.s = 500,  range.s = 50, nugget.s = 10,  
+    sill.t = 500,  range.t = 10,  nugget.t = 10,  
+    sill.st = 500, range.st = 500, nugget.st =100, 
+    anis = 2000
+  ),
+                 control = list(parscale = c(1,100,1,1,0.5,1,1,100,1,100),
+                               maxit=1e4))
+```
+
+
+
+
+```{r}
+fitsepModel
+```
+
+
+
+
+
+```{r}
+plot(st_variogram, list(fitsepModel$bestModel$fit, fitproductSumModel$bestModel$fit, fitmetricModel$bestModel$fit ), wireframe=T, all=T, scales=list(arrows=F) )
+```
+
+
+```{r}
+cat("fitsepModel", attr(fitsepModel, "MSE"), "\n")
+cat("fitproductSumModel", attr(fitproductSumModel, "MSE"), "\n")
+cat("fitmetricModel", attr(fitmetricModel, "MSE"), "\n")
+cat("fitsumMetricModel", attr(fitsumMetricModel, "MSE"), "\n")
+#fitsepModel 3675.584
+#fitproductSumModel 25.34525  
+#fitmetricModel 4.742983 
+#fitsumMetricModel 3.675458 
+
+# 
+# #fitsepModel 1.958115 
+# fitproductSumModel 19.09043 
+# fitmetricModel 2.18029 
+# fitsumMetricModel 1.810264
+```
+colnames
+```{r}
+colnames(stfdf_uk@data)
+```
+
+
+```{r}
+stfdf_uk <-stfdf_uk[,,- 19] #togliamo pm10_ad
+```
+
+```{r}
+colnames(stfdf_uk@data)
+```
+
+```{r}
+res <- matrix(NA, length(stfdf_uk@sp), 730)
+for(loc in 1:length(stfdf_uk@sp)) {
+  cat("Location", loc, "\n")
+  res[loc,!is.na(target[loc, 1:730])[,"PM10"]] <- krigeST(PM10~ -1 + Temp +u_media + v_media +Umidit +VelVentoMedia + season+ lag7  + lag1 + Source , 
+                  data=stfdf_uk[(1:length(stfdf_uk@sp))[-loc],], 
+                  newdata=stfdf_uk[loc, 1:730, drop=F], 
+                  fitsepModel,  lambda = 0.3838384,                                                          stAni=linStAnisotropia_uk)$var1.pred
+}
+
+```
+
+
+
+
+
+
+```{r}
+## seprable model
+# 10 neighbours
+#specifica il numero massimo di vicini (considerati sia nello spazio che nel tempo) che verranno usati per stimare la variabile alla località-tempo target. In altre parole, questo parametro limita quanti punti saranno presi in considerazione per la predizione.
+target <- as(stfdf_uk[,,"PM10"],"STFDF") 
+# res <- matrix(NA, length(stfdf_uk@sp), 730)
+# for(loc in 1:length(stfdf_uk@sp)) {
+#   cat("Location", loc, "\n")
+#   #  assegna le previsioni di PM10 alla matrice res, che è vuota all'inizio.
+#   res[loc,!is.na(target[loc, 1:730])[,"PM10"]] <- krigeST(PM10~ -1 + Temp +u_media + v_media +Umidit +VelVentoMedia + season+ lag7  + lag1 + Source , 
+#                   data=stfdf_uk[(1:length(stfdf_uk@sp))[-loc],], 
+#                   newdata=stfdf_uk[loc, 1:730, drop=F],  #Osservazione da predire (coordinate spaziali e temporali del punto loc
+#                   fitsepModel,  nmax=10,  lambda = 0.3838384,                                                        stAni=linStAnisotropia_uk)$var1.pred
+# } 
+# 
+# stfdf_uk@data$sepModelAll <- as.vector(res)[!is.na(as.vector(res))]
+# # 50 neighbours
+# res <- matrix(NA, length(stfdf_uk@sp), 730)
+# for(loc in 1:length(stfdf_uk@sp)) {
+#   cat("Location", loc, "\n")
+#   res[loc,!is.na(target[loc, 1:730])[,"PM10"]] <- krigeST(PM10~ -1 + Temp +u_media + v_media +Umidit +VelVentoMedia + season+ lag7  + lag1 + Source , 
+#                   data=stfdf_uk[(1:length(stfdf_uk@sp))[-loc],], 
+#                   newdata=stfdf_uk[loc, 1:730, drop=F], 
+#                   fitsepModel, nmax=50, lambda = 0.3838384,                                                          stAni=linStAnisotropia_uk)$var1.pred
+# }
+# 
+# stfdf_uk@data$sepModel50Nghbr <- as.vector(res)[!is.na(as.vector(res))]
+# all
+res <- matrix(NA, length(stfdf_uk@sp), 730)
+for(loc in 1:length(stfdf_uk@sp)) {
+  cat("Location", loc, "\n")
+  res[loc,!is.na(target[loc, 1:730])[,"PM10"]] <- krigeST(PM10~ -1 + Temp +u_media + v_media +Umidit +VelVentoMedia + season+ lag7  + lag1 + Source , 
+                  data=stfdf_uk[(1:length(stfdf_uk@sp))[-loc],], 
+                  newdata=stfdf_uk[loc, 1:730, drop=F], 
+                  fitsepModel,  lambda = 0.3838384,                                                          stAni=linStAnisotropia_uk)$var1.pred
+}
+
+stfdf_uk@data$sepModel50Nghbr <- as.vector(res)[!is.na(as.vector(res))]
+## product-sum model
+# 10 neighbours
+# res <- matrix(NA, length(stfdf_uk@sp), 730)
+# for(loc in 1:length(stfdf_uk@sp)) {
+#   cat("Location", loc, "\n")
+#   res[loc,!is.na(target[loc, 1:730])[,"PM10"]] <- krigeST(PM10~ -1 + Temp +u_media + v_media +Umidit +VelVentoMedia + season+ lag7  + lag1 + Source ,                                                                data=stfdf_uk[(1:length(stfdf_uk@sp))[-loc],], 
+# newdata=stfdf_uk[loc, 1:730, drop=F], 
+# fitproductSumModel,nmax=10, lambda = 0.3838384,
+# stAni=linStAnisotropia_uk)$var1.pred
+# }
+# 
+# stfdf_uk@data$productsumModelAll <- as.vector(res)[!is.na(as.vector(res))]
+# 
+# 
+# # 50 neighbours
+# res <- matrix(NA, length(stfdf_uk@sp), 730)
+# for(loc in 1:length(stfdf_uk@sp)) {
+#   cat("Location", loc, "\n")
+#   res[loc,!is.na(target[loc, 1:730])[,"PM10"]] <- krigeST(PM10~ -1 + Temp +u_media + v_media +Umidit +VelVentoMedia + season+ lag7  + lag1 + Source ,                                                                data=stfdf_uk[(1:length(stfdf_uk@sp))[-loc],], 
+# newdata=stfdf_uk[loc, 1:730, drop=F], 
+# fitproductSumModel, nmax=50,lambda = 0.3838384,
+# stAni=linStAnisotropia_uk)$var1.pred
+# }
+
+stfdf_uk@data$productsumModel50Nghbr <- as.vector(res)[!is.na(as.vector(res))]
+# all
+res <- matrix(NA, length(stfdf_uk@sp), 730)
+for(loc in 1:length(stfdf_uk@sp)) {
+  cat("Location", loc, "\n")
+  res[loc,!is.na(target[loc, 1:730])[,"PM10"]] <- krigeST(PM10~ -1 + Temp +u_media + v_media +Umidit +VelVentoMedia + season+ lag7  + lag1 + Source ,                                                                data=stfdf_uk[(1:length(stfdf_uk@sp))[-loc],], 
+newdata=stfdf_uk[loc, 1:730, drop=F], 
+fitproductSumModel, lambda = 0.3838384,
+stAni=linStAnisotropia_uk)$var1.pred
+}
+## metric model
+# # 10 neighbours
+# res <- matrix(NA, length(stfdf_uk@sp), 730)
+# for(loc in 1:length(stfdf_uk@sp)) {
+#   cat("Location", loc, "\n")
+#   res[loc,!is.na(target[loc, 1:730])[,"PM10"]] <- krigeST(PM10~ -1 + Temp +u_media + v_media +Umidit +VelVentoMedia + season+ lag7  + lag1 + Source , 
+#                                                           
+#                                 data=stfdf_uk[(1:length(stfdf_uk@sp))[-loc],], 
+#                                 newdata=stfdf_uk[loc, 1:730, drop=F], 
+#                                 fitmetricModel,nmax=10,lambda = 0.3838384,
+#                                 stAni=linStAnisotropia_uk)$var1.pred
+# }
+# 
+# stfdf_uk@data$metricModelAll <- as.vector(res)[!is.na(as.vector(res))]
+# 
+# 
+# # 50 neighbours
+# res <- matrix(NA, length(stfdf_uk@sp), 730)
+# for(loc in 1:length(stfdf_uk@sp)) {
+#   cat("Location", loc, "\n")
+#   res[loc,!is.na(target[loc, 1:730])[,"PM10"]] <- krigeST(PM10~ -1 + Temp +u_media + v_media +Umidit +VelVentoMedia + season+ lag7  + lag1 + Source , 
+#                                                           
+#                                 data=stfdf_uk[(1:length(stfdf_uk@sp))[-loc],], 
+#                                 newdata=stfdf_uk[loc, 1:730, drop=F], 
+#                                 fitmetricModel, nmax=50,lambda = 0.3838384,
+#                                 stAni=linStAnisotropia_uk)$var1.pred
+# }
+# 
+# stfdf_uk@data$metricModel50Nghbr <- as.vector(res)[!is.na(as.vector(res))]
+# all
+res <- matrix(NA, length(stfdf_uk@sp), 730)
+for(loc in 1:length(stfdf_uk@sp)) {
+  cat("Location", loc, "\n")
+  res[loc,!is.na(target[loc, 1:730])[,"PM10"]] <- krigeST(PM10~ -1 + Temp +u_media + v_media +Umidit +VelVentoMedia + season+ lag7  + lag1 + Source , 
+                                                          
+                                data=stfdf_uk[(1:length(stfdf_uk@sp))[-loc],], 
+                                newdata=stfdf_uk[loc, 1:730, drop=F], 
+                                fitmetricModel,lambda = 0.3838384,
+                                stAni=linStAnisotropia_uk)$var1.pred
+}
+
+stfdf_uk@data$metricModelAll <- as.vector(res)[!is.na(as.vector(res))]
+## sum-metric model
+# 10 neighbours
+# res <- matrix(NA, length(stfdf_uk@sp), 730)
+# for(loc in 1:length(stfdf_uk@sp)) { # loc <- 1
+#   cat("Location", loc, "\n")
+#   res[loc,!is.na(target[loc, 1:730])[,"PM10"]] <- krigeST(PM10~ -1 + Temp +u_media + v_media +Umidit +VelVentoMedia + season+ lag7  + lag1 + Source ,
+#                                                                                                                  data=stfdf_uk[(1:length(stfdf_uk@sp))[-loc],], 
+#                                   newdata=stfdf_uk[loc, 1:730, drop=F], 
+#                                   fitsumMetricModel,  nmax=10,lambda = 0.3838384,
+#                                   stAni=linStAnisotropia_uk)$var1.pred
+# }
+# 
+# stfdf_uk@data$sumMetricModelAll <- as.vector(res)[!is.na(as.vector(res))]
+# 
+# # 50 neighbours
+# res <- matrix(NA, length(stfdf_uk@sp), 730)
+# for(loc in 1:length(stfdf_uk@sp)) { # loc <- 1
+#   cat("Location", loc, "\n")
+#   res[loc,!is.na(target[loc, 1:730])[,"PM10"]] <- krigeST(PM10~ -1 + Temp +u_media + v_media +Umidit +VelVentoMedia + season+ lag7  + lag1 + Source ,
+#                                                                                                                  data=stfdf_uk[(1:length(stfdf_uk@sp))[-loc],], 
+#                                   newdata=stfdf_uk[loc, 1:730, drop=F], 
+#                                   fitsumMetricModel, nmax=50,lambda = 0.3838384,
+#                                   stAni=linStAnisotropia_uk)$var1.pred
+# }
+# 
+# stfdf_uk@data$sumMetricModel50Nghbr <- as.vector(res)[!is.na(as.vector(res))]
+# all
+res <- matrix(NA, length(stfdf_uk@sp), 730)
+for(loc in 1:length(stfdf_uk@sp)) { # loc <- 1
+  cat("Location", loc, "\n")
+  res[loc,!is.na(target[loc, 1:730])[,"PM10"]] <- krigeST(PM10~ -1 + Temp +u_media + v_media +Umidit +VelVentoMedia + season+ lag7  + lag1 + Source ,
+                                                                                                                 data=stfdf_uk[(1:length(stfdf_uk@sp))[-loc],], 
+                                  newdata=stfdf_uk[loc, 1:730, drop=F], 
+                                  fitsumMetricModel, lambda = 0.3838384,
+                                  stAni=linStAnisotropia_uk)$var1.pred
+}
+
+stfdf_uk@data$sumMetricModel50Nghbr <- as.vector(res)[!is.na(as.vector(res))]
+```
+
+
+
+
+
+```{r}
+target <- as(stfdf_uk[,,"PM10"],"STFDF") 
+res <- matrix(NA, length(stfdf_uk@sp),730 ) #730
+for(loc in 1:length(stfdf_uk@sp)) { # loc <- 1
+  cat("Location", loc, "\n")
+  res[loc,!is.na(target[loc, 1:730])[,"PM10"]] <- krigeST(PM10~ -1 + Temp +u_media + v_media +Umidit +VelVentoMedia + season+ lag7  + lag1 + Source  ,
+                                                                                                                 data=stfdf_uk[(1:length(stfdf_uk@sp))[-loc],], 
+                                  newdata=stfdf_uk[loc, 1:730, drop=F], 
+                                  fitsumMetricModel, lambda = 0.3838384,
+                                  stAni=linStAnisotropia_uk)$var1.pred
+}
+
+stfdf_uk@data$sumMetricModelallNghbr <- as.vector(res)[!is.na(as.vector(res))]
+```
+```{r}
+crossStat("sumMetricModelallNghbr", digits=2)
+```
+
+```{r}
+data <- stfdf_uk@data
+```
+
+
+```{r}
+rbind(crossStat( var1= "metricModelAll", df= data),
+crossStat( var1= "productsumModel50Nghbr", df= data),
+crossStat( var1= "sepModel50Nghbr", df= data),
+crossStat( var1= "sepModel50Nghbr", df= data),
+crossStat( var1= "sumMetricModelallNghbr", df= data) )
+# RMSE      MAE           ME       COR        R2
+# [1,] 8.198028 5.932611 0.0004652857 0.8551597 0.7312979
+# [2,] 8.198028 5.932611 0.0004652857 0.8551597 0.7312979
+# [3,] 8.198028 5.932611 0.0004652857 0.8551597 0.7312979
+
+```
+
+
+
+```{r}
+## cross-validation
+#var2 di default pm10, colonna originale
+crossStat <- function(var1, var2="PM10", STxDF=stfdf_uk, digits=NA) {
+  
+  diff <- STxDF[,,var1,drop=F]@data[[1]] - STxDF[,,var2,drop=F]@data[[1]]
+  RMSE <- sqrt(mean(diff^2))
+  MAE <- mean(abs(diff))
+  ME <- mean(diff)
+  COR <- cor(STxDF[,,var1,drop=F]@data[[1]], STxDF[,,var2,drop=F]@data[[1]])
+    y_osservato <- STxDF[,,var2,drop=F]@data[[1]] # Valori reali
+  y_predetto <- STxDF[,,var1,drop=F]@data[[1]] # Valori stimati
+cat(cor(y_osservato, y_predetto, use="complete.obs"), "\n")
+R1 <- 1 - (sum((y_osservato - y_predetto)^2, na.rm=TRUE) /
+           sum((y_osservato - mean(y_osservato, na.rm=TRUE))^2, na.rm=TRUE))
+cat(R1, "\n")
+# Calcolo dell'R^2
+SSE <- sum((y_osservato - y_predetto)^2)
+TSS <- sum((y_osservato - mean(y_osservato))^2)
+cat("SSE:", SSE, "TSS:", TSS, "\n")
+R2 <- 1 - (SSE / TSS)
+  res <- c(RMSE, MAE, ME, COR, R2)
+  names(res) <- c("RMSE", "MAE", "ME", "COR", "R2")
+  if(is.na(digits))
+    return(res)
+  else
+    return(round(res, digits))
+}
+```
+
+
+```{r}
+crossStat("sumMetricModel50Nghbr", digits=2)
+```
+
+```{r}
+data <- stfdf_uk@data
+# data1 <- data %>%
+#   mutate(
+#     lag1 = round(lag1, 4),
+#     lag7 = round(lag7, 4),
+#     PM10 = round(PM10, 4)
+#   )
+```
+
+
+
+```{r}
+data1 <- data %>% dplyr::select("PM10","Temp","Umidit","VelVentoMedia","Source", "u_media", "v_media","day_of_year","lag1","lag7","sumMetricModelallNghbr","season","Continuous_urban_fabric","month")  %>% mutate(ok= ifelse(sumMetricModelallNghbr <0, 0, 3))   
+
+da <- df%>% dplyr::select(Station, DatetimeBegin, Lat, Long,PM10, day_of_year,month, lag1, Continuous_urban_fabric)
+data1 <- data1%>% left_join(da, by= c("PM10", "day_of_year", "month","lag1","Continuous_urban_fabric" ))
+
+```
+
+
+```{r}
+data1 %>% dplyr::filter(ok==0) %>% dplyr::pull("Station") %>% unique()%>%   cat(sep = ", ")
+```
+```{r}
+data1 %>% dplyr::filter(ok==0) %>% dplyr::pull("DatetimeBegin") %>% unique %>% format("%Y-%m-%d")%>%   cat(sep = ", ")
+```
+```{r}
+
+```
+
+
+
+
+
+
+```{r}
+data1 %>% dplyr::filter(ok == 0) %>% dplyr::select( Station, DatetimeBegin, sumMetricModelallNghbr) %>% pull( Station) %>% unique()
+
+```
+
+
+
+```{r}
+#negativi
+datas <- df %>%
+  filter(
+    Station %in% c("22851", "24644", "32399", "40256", "44216", "50128", "70169", "MILANO - VERZIERE") , #2023-08-07  "22851", "40256", "50128","MILANO PASCAL CITT� STUDI"),
+    DatetimeBegin %in% as.POSIXct(c("2022-09-18", "2023-08-07", "2023-11-26", "2023-12-02", "2023-12-22", "2023-03-27", "2023-07-26", "2023-08-06", "2022-04-09", "2022-07-07", "2022-07-10", "2022-08-12", "2022-09-17", "2023-03-28", "2023-11-25"))
+  ) #%>% dplyr::select(-sumMetricModelallNghbr, -ok)
+```
+
+
+
+
+
+```{r}
+#data1 %>% dplyr::filter(Station== "40256" & DatetimeBegin == as.Date("2023-08-07")) %>% sumMetricModelallNghbr
+
+data1 <- data1 %>% mutate(
+    sumMetricModelallNghbr = if_else(
+      Station == "50128" & DatetimeBegin == as.Date("2023-08-07"),
+      3.4422,
+      sumMetricModelallNghbr   # altrimenti mantieni il valore originale
+    )
+  )
+```
+
+
+```{r}
+data1$ok <- 3
+```
+
+
+
+```{r}
+#archivio in data3 
+data3 <-  data1 %>%
+  filter(ok == 3) %>%
+  arrange(DatetimeBegin, Station, desc(sumMetricModelallNghbr)) %>%
+  group_by(PM10, DatetimeBegin, Station) %>%
+  slice_head(n = 1) %>%
+  ungroup() 
+
+```
+
+
+```{r}
+#ddt <- data3
+ddt <- ddt %>% bind_rows(data3)
+```
+
+```{r}
+tt <- df %>% dplyr::filter(Station == "MILANO PASCAL CITT� STUDI" & DatetimeBegin== as.Date("2023-08-07")) %>% mutate(sumMetricModelallNghbr = 5.44323, ok= 3) %>% dplyr::select(PM10, Temp, Umidit, VelVentoMedia, Source, u_media, v_media, day_of_year, lag1, lag7, sumMetricModelallNghbr, season, Continuous_urban_fabric, month, ok, Station, DatetimeBegin, Lat, Long)
+
+```
+
+
+
+
+
+
+```{r}
+put <- ddts  %>% bind_rows(tt)
+```
+
+
+
+```{r}
+ddts <-  ddt %>%
+  filter(ok == 3) %>%
+  arrange(DatetimeBegin, Station, desc(sumMetricModelallNghbr)) %>%
+  group_by(PM10, DatetimeBegin, Station) %>%
+  slice_head(n = 1) %>%
+  ungroup() 
+
+```
+
+
+
+
+
+```{r}
+rbind(
+crossStat("sepModel10Nghbr", digits=2),
+crossStat("sepModel50Nghbr", digits=2),
+
+crossStat("productsumModel10Nghbr", digits=2),
+crossStat("productsumModel50Nghbr", digits=2),
+
+crossStat("metricModel10Nghbr", digits=2),
+crossStat("metricModel50Nghbr", digits=2),
+
+crossStat("sumMetricModel10Nghbr", digits=2),
+crossStat("sumMetricModel50Nghbr", digits=2))
+#RMSE   MAE       R2
+#31.94 16.58   -2.50
+#10.32  7.19   0.63
+#27.43 12.98  -1.58 
+#9.38  6.50   0.70
+#31.94 16.58   -2.50
+#10.32  7.19  0.63
+#27.43 12.98  -1.58
+#9.21  6.30  0.71
+
+# RMSE   MAE    ME  COR   R2
+#[1,]  9.44  6.63 -0.22 0.83 0.69
+#[2,] 10.32  7.19 -0.18 0.80 0.63
+#[3,] 12.58 10.13 -8.59 0.84 0.46
+#[4,]  9.38  6.50 -0.11 0.84 0.70
+#[5,]  9.44  6.63 -0.22 0.83 0.69  metricModel10Nghbr
+#[6,] 10.32  7.19 -0.18 0.80 0.63  metricModel50Nghbr
+#[7,]  8.94  6.21 -0.12 0.85 0.73
+#[8,]  9.21  6.30  0.11 0.84 0.71
+```
+
+```{r}
+crossStat("sumMetricModel50Nghbr", digits=2)
+```
+
+
+```{r}
+crossStat <- function(var1, var2="PM10", STxDF=stfdf_uk, digits=NA) {
+  
+  diff <- STxDF[,,var1,drop=F]@data[[1]] - STxDF[,,var2,drop=F]@data[[1]]
+  RMSE <- sqrt(mean(diff^2))
+  MAE <- mean(abs(diff))
+  ME <- mean(diff)
+  COR <- cor(STxDF[,,var1,drop=F]@data[[1]], STxDF[,,var2,drop=F]@data[[1]])
+    y_osservato <- STxDF[,,var2,drop=F]@data[[1]] # Valori reali
+  y_predetto <- STxDF[,,var1,drop=F]@data[[1]] # Valori stimati
+cat(cor(y_osservato, y_predetto, use="complete.obs"), "\n")
+R1 <- 1 - (sum((y_osservato - y_predetto)^2, na.rm=TRUE) /
+           sum((y_osservato - mean(y_osservato, na.rm=TRUE))^2, na.rm=TRUE))
+cat(R1, "\n")
+# Calcolo dell'R^2
+SSE <- sum((y_osservato - y_predetto)^2)
+TSS <- sum((y_osservato - mean(y_osservato))^2)
+cat("SSE:", SSE, "TSS:", TSS, "\n")
+R2 <- 1 - (SSE / TSS)
+  res <- c(RMSE, MAE, ME, COR, R2)
+  names(res) <- c("RMSE", "MAE", "ME", "COR", "R2")
+  if(is.na(digits))
+    return(res)
+  else
+    return(round(res, digits))
+}
+```
+
+
+
+
+```{r}
+crossStat <- function(df= NULL, observed_col = "PM10", pred_cols, digits = NA) {
+  
+col_list <- c("22851","24644","32399","40256","44216","50128","70169","MILANO - SENATO","MILANO - V.LE MARCHE","MILANO - VERZIERE","MILANO PASCAL Citta studi")
+  # Initialize results dataframe
+  results <- data.frame(Model = character(), RMSE = numeric(), MAE = numeric(), ME = numeric(), COR = numeric(), R2 = numeric())
+
+
+    
+   for (pred_col in pred_cols) {
+    y_observed <- df[[observed_col]]  # Real values (PM10)
+    y_predicted <- df[[pred_col]]  # Predicted values
+    
+    # Compute metrics
+    diff <- y_predicted - y_observed
+    RMSE <- sqrt(mean(diff^2, na.rm = TRUE))
+    MAE <- mean(abs(diff), na.rm = TRUE)
+    ME <- mean(diff, na.rm = TRUE)
+    COR <- cor(y_observed, y_predicted, use = "complete.obs")
+    
+    # Compute R²
+    SSE <- sum((y_observed - y_predicted)^2, na.rm = TRUE)  # Sum of Squared Errors
+    TSS <- sum((y_observed - mean(y_observed, na.rm = TRUE))^2, na.rm = TRUE)  # Total Sum of Squares
+    R2 <- 1 - (SSE / TSS)
+    
+    # Store results
+    results <- rbind(results, data.frame(Station= station, Model = pred_col, RMSE = RMSE, MAE = MAE, ME = ME, COR = COR, R2 = R2))
+  } 
+    
+    
+    
+  
+  
+
+  # Round results if digits is specified
+  if (!is.na(digits)) {
+    results <- results %>% mutate(across(where(is.numeric), round, digits = digits))
+  }
+
+  return(results)
+}
+```
+
+```{r}
+
+crossStat_stazione <- function(df= NULL, observed_col = "PM10", pred_col = NULL, digits = NA) {
+
+col_list <- c("22851","24644","32399","40256","44216","50128","70169","MILANO - SENATO","MILANO - V.LE MARCHE","MILANO - VERZIERE","MILANO PASCAL Citta studi")
+colonne_results <- list() 
+for (prediction_columns in pred_col){
+  
+stazione_results <- list() 
+  
+
+for (station in col_list){
+  
+  
+  
+  df_temp<- df %>% dplyr::filter(Station == station)
+   metrics_results <- crossStat(df_temp, observed_col = observed_col, pred_cols = prediction_columns, digits = digits)
+   
+ stazione_results[[station]] <- metrics_results
+}
+
+
+colonne_results [[prediction_columns]] <- dplyr::bind_rows(stazione_results, .id = "Station")}
+
+return(colonne_results )}
+
+
+#crossStat_stazione(df=df2, pred_col=c("Uk_sumMetricModelAll" , "Uk_sumMetricModel50Nghbr" ) , digits=3 )
+
+#crossStat_stazione(df=df1, pred_col=c("Ok_sepModel10Nghbr","Ok_sepModelAll" , "Ok_sepModel50Nghbr", "Ok_productsumModel10Nghbr", #"Ok_productsumModelAll","Ok_productsumModel50Nghbr","Ok_metricModel10Nghbr","Ok_metricModelAll" #,"Ok_metricModel50Nghbr","Ok_sumMetricModel10Nghbr","Ok_sumMetricModelAll" ) , digits=3 )
+```
+
+
+
+```{r}
+library(purrr) 
+```
+
+```{r}
+summary_list <- list()
+for (col in unique(df$Station)){
+  df_temp <- df %>% dplyr::filter(Station == col)
+  summary_data <- summary(df_temp $PM10)
+   df_summary <- as.data.frame(t(summary_data)) 
+   df_summary <-df_summary[,-1]  # Trasponi il summary
+ colnames(df_summary)[2] <- col
+#colnames(df_summary)  <- col
+  summary_list[[col]] <- df_summary
+}
+final_summary <- reduce(summary_list, left_join, by = "Var2")
+```
+
+```{r}
+final_summary
+```
+
+
+
+```{r}
+observed_column <- "PM10"
+prediction_columns <- c("Ok_sepModel10Nghbr","Ok_sepModelAll" , "Ok_sepModel50Nghbr", "Ok_productsumModel10Nghbr", "Ok_productsumModelAll","Ok_productsumModel50Nghbr","Ok_metricModel10Nghbr","Ok_metricModelAll" ,"Ok_metricModel50Nghbr","Ok_sumMetricModel10Nghbr","Ok_sumMetricModelAll" )
+metrics_results <- crossStat(df1, observed_col = observed_column, pred_cols = prediction_columns, digits = 3)
+metrics_results
+```
+
+
+
+
+```{r}
+observed_column <- "PM10"
+prediction_columns <- c("Uk_productsumModel10Nghbr", "Uk_metricModel10Nghbr", "Uk_sumMetricModel10Nghbr", "Uk_sumMetricModelAll", "Uk_sumMetricModel50Nghbr")
+metrics_results <- crossStat(df2, observed_col = observed_column, pred_cols = prediction_columns, digits = 3)
+
+```
+
+
+```{r}
+colnames(df2)
+```
+
+
+## analisi risultati
+
+
+```{r}
+df1 <-  read_csv("C:/Users/samir/Downloads/dati_tesi/predizioniOK.csv",show_col_types = FALSE, )
+df2 <-  read_csv("C:/Users/samir/Downloads/dati_tesi/predizioniUK.csv",show_col_types = FALSE, )
+
+handles <- function(df= NULL) {
+col_list <- c("22851",
+"24644",
+"32399",
+"40256",
+"44216",
+"50128",
+"70169",
+"MILANO - SENATO",
+"MILANO - V.LE MARCHE",
+"MILANO - VERZIERE",
+"MILANO PASCAL Citta studi")
+  
+time_seq <- seq(
+  from = as.Date("2022-01-01"),
+  to = as.Date("2023-12-31"),
+  by = "day"
+)  
+df$Date <- rep(time_seq, each = 11)  # Repeat each date 11 times
+df$Station <- rep(col_list, times = length(time_seq))  
+
+if (length(df) < 20){
+  df <- df %>%  rename_with(~ paste0("Ok_", .), .cols = setdiff(names(df), c("Date", "Station", "PM10")))
+} else {
+  
+ df <- df %>%  rename_with(~ paste0("Uk_", .), .cols = setdiff(names(df), c("Date", "Station", "PM10"))) 
+}
+return(df)
+}
+
+df1 <- handles(df=df1)
+df2 <- handles(df=df2)
+```
+
+
+
+
+
+```{r}
+   
+   
+ggplot(df3, aes(x = Date, y = Value, color = variable, linetype = variable, size = variable)) +
+  geom_line() +  
+  labs(title = station, x = "Date", y = "PM10 Levels") +
+  
+  scale_x_date(date_labels = "%Y-%m-%d", date_breaks = "15 days", expand = expansion(mult = c(0.07, 0.07))) +
+  
+  scale_color_manual(values = c("PM10" = "darkgreen", 
+                                "sumMetricModel10Nghbr_OK" = "#8c564b", 
+                                "sumMetricModel10Nghbr_UK" = "coral")) + 
+  
+  scale_linetype_manual(values = c("PM10" = "solid", 
+                                   "sumMetricModel10Nghbr_OK" = "solid", 
+                                   "sumMetricModel10Nghbr_UK" = "solid")) +  
+  
+  scale_size_manual(values = c("PM10" = 0.6, 
+                               "sumMetricModel10Nghbr_OK" = 0.75,
+                               "sumMetricModel10Nghbr_UK" = 0.75)) +  
+
+  theme_minimal() +  
+  theme(legend.title = element_blank(), 
+        legend.position = c(0.35, 0.95), 
+        legend.direction = "horizontal") 
+```
+
+
+
+```{r}
+
+grafico1 <- function(dfOK= df1, dfUK= df2, col= NULL ,station= NULL){
+  
+
+df <- dfOK %>% dplyr::filter(Station %in% station ) %>% dplyr::select(Date, PM10,  any_of(col))  %>%   left_join(dfUK %>% dplyr::filter(Station %in% station ) %>% dplyr::select(Date, PM10, any_of(col)),  by = c("Date"="Date","PM10"="PM10"), )
+ 
+  
+col_df <-df %>% select(-c(1,1)) %>% colnames()  
+df<- df %>%
+  pivot_longer(
+    cols = col_df,  # Columns to pivot
+    names_to = "variable",   # New column for variable names
+    values_to = "Value"      # New column for values
+  ) %>% dplyr::filter( Date >= as.Date("2022-03-01") & Date <= as.Date("2022-06-30"))
+
+plot <- NULL
+if (length(col_df) > 2) { 
+  suffix_ok <- str_extract(col_df[2], "\\d+|All")  # Extracts number (10, 50) or "All"
+suffix_uk <- str_extract(col_df[3], "\\d+|All")
+custom_labels <- c("Observed Data", paste0("PredOk", suffix_ok), paste0("PredUk", suffix_uk))
+
+
+plot <- ggplot(df, aes(x = Date, y = Value, color = variable, linetype = variable, size = variable)) +
+  geom_line() +  
+  labs(x = "Date", y = "PM10 Levels") +
+  
+  scale_x_date(date_labels = "%Y-%m-%d", date_breaks = "15 days", expand = expansion(mult = c(0.07, 0.07))) +
+  
+  scale_color_manual(values = setNames(c("darkgreen", "#8c564b", "coral"), 
+                                       c(col_df[1], col_df[2], col_df[3])),
+                     labels = custom_labels) + 
+  
+  scale_linetype_manual(values = setNames(c("solid", "solid", "solid"), 
+                                          c(col_df[1], col_df[2], col_df[3])),
+                        labels = custom_labels) +  
+  
+  scale_size_manual(values = setNames(c(0.6, 0.75, 0.75), 
+                                      c(col_df[1], col_df[2], col_df[3])),
+                    labels = custom_labels) +  
+
+  theme_minimal() +  
+  theme(legend.title = element_blank(), 
+        legend.position = c(0.25, 1), 
+        legend.direction = "horizontal")
+} else if  (length(col_df) == 2){
+    if (str_detect(col_df[2], "Ok")) {
+
+    
+   suffix_ok <- str_extract(col_df[2], "\\d+|All") 
+   custom_labels <- c("Observed Data", paste0("PredOk", suffix_ok))
+  } else{
+    suffix_uk <- str_extract(col_df[2], "\\d+|All")
+    custom_labels <- c("Observed Data", paste0("PredUk", suffix_uk))
+  }
+  
+ plot <- ggplot(df, aes(x = Date, y = Value, color = variable, linetype = variable, size = variable)) +
+      geom_line() +  
+      labs(x = "Date", y = "PM10 Levels") +
+      
+      scale_x_date(date_labels = "%Y-%m-%d", date_breaks = "15 days", expand = expansion(mult = c(0.07, 0.07))) +
+      
+      scale_color_manual(values = setNames(c("darkgreen", "coral"), col_df),
+                         labels = custom_labels) + 
+      
+      scale_linetype_manual(values = setNames(c("solid", "solid"), col_df),
+                            labels = custom_labels) +  
+      
+      scale_size_manual(values = setNames(c(0.6, 0.75), col_df),
+                        labels = custom_labels) +  
+      
+      theme_minimal() +  
+      theme(legend.title = element_blank(), 
+            legend.position = c(0.25, 1), 
+            legend.direction = "horizontal")
+  }
+
+return(plot)
+}
+
+```
+
+```{r}
+####stazioni
+##"22851","24644","32399","40256","44216","50128","70169",
+##"MILANO - SENATO","MILANO - V.LE MARCHE","MILANO - VERZIERE","MILANO PASCAL Citta studi"
+##"Ok_sepModel10Nghbr","Ok_sepModelAll", "Ok_sepModel50Nghbr" "Ok_productsumModel10Nghbr" ,"Ok_productsumModelAll" ##,"Ok_productsumModel50Nghbr", "Ok_metricModel10Nghbr","Ok_metricModelAll", "Ok_metricModel50Nghbr","Ok_sumMetricModel10Nghbr" #à,"Ok_sumMetricModelAll"     "Ok_sumMetricModel50Nghbr"
+##col disponibili: "Uk_productsumModel10Nghbr" ,"Uk_metricModel10Nghbr","Uk_sumMetricModel10Nghbr" ,"Uk_sumMetricModelAll" "Uk_sumMetricModel50Nghbr"
+
+##sempre due valori
+#grafico1(col = c("Ok_sumMetricModelAll", "Uk_sumMetricModel50Nghbr"), station = "MILANO - VERZIERE")  
+grafico1(col = c("Uk_sumMetricModel50Nghbr"), station = "MILANO - VERZIERE") 
+```
+
+```{r}
+grafico2 <- function(dfOK= df1, dfUK= df2, station= NULL){
+ 
+df <- dfOK %>% dplyr::filter(Station %in% station ) %>% dplyr::select(PM10, Date,Ok_sumMetricModelAll, Ok_sumMetricModel10Nghbr,Ok_sumMetricModel50Nghbr)  %>%   left_join(dfUK %>% dplyr::filter(Station %in% station ) %>% dplyr::select(PM10, Date,Uk_sumMetricModelAll, Uk_sumMetricModel10Nghbr,Uk_sumMetricModel50Nghbr),  by = c("Date"="Date","PM10"="PM10"), )
+
+
+return(df)
+}
+```
+
+
+```{r}
+ df6 <- grafico2( station = "MILANO - VERZIERE")
+```
+
+```{r}
+colnames((df6))
+```
+
+```{r}
+df_diff <- df6 %>%
+  mutate(Diff_OkPred10 = Ok_sumMetricModel10Nghbr - PM10,
+         Diff_OkPred50 = Ok_sumMetricModel50Nghbr - PM10,
+         Diff_OkPredAll = Ok_sumMetricModelAll - PM10,
+         Diff_UKPred10 = Uk_sumMetricModel10Nghbr - PM10,
+         Diff_UKPred50 = Uk_sumMetricModel50Nghbr - PM10,
+         Diff_UKPredAll = Uk_sumMetricModelAll - PM10
+         ) %>%
+  dplyr::select(Date, starts_with("Diff"))
+
+df_diff <- df_diff %>%
+  pivot_longer(
+    cols = -Date,       # Select all columns except 'Date'
+    names_to = "variable",
+    values_to = "Value"
+  )
+```
+
+```{r}
+df_diff<- df_diff %>%
+  pivot_longer(
+    names_to = "variable",   # New column for variable names
+    values_to = "Value"      # New column for values
+  )
+```
+
+
+```{r}
+df6<- df2 %>% dplyr::select(Station,PM10,Uk_sumMetricModel50Nghbr, Date) %>% 
+  pivot_longer(
+    cols = c(-Date,-Station) ,  # Columns to pivot
+    names_to = "variable",   # New column for variable names
+    values_to = "Value"      # New column for values
+  ) 
+```
+
+
+
+```{r}
+
+
+ggplot(df6, aes(x = df6, y = Value, color = variable)) +
+  geom_point(alpha = 0.5) +
+  geom_abline(slope = 1, intercept = 0, color = "black", linetype = "dashed") +  
+  labs(title = "Observed vs. Predicted PM10",
+       x = "Observed PM10", y = "Predicted PM10") +
+  theme_minimal()
+```
+
+
+```{r}
+ggplot(df_diff, aes(x = variable, y = Value, fill = variable)) +
+  geom_violin(trim = FALSE, alpha = 0.6) +
+  geom_boxplot(width = 0.1, outlier.shape = NA) + 
+  labs(title = "Distribution of Prediction Errors",
+       x = "Prediction Models",
+       y = "Difference (PM10 - Predicted Value)") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1),
+        legend.position = "none")
+```
+
+
+```{r}
+df_diff <- df6 %>%
+  mutate(Diff_OkPred10 = Ok_sumMetricModel10Nghbr - PM10,
+         Diff_OkPred50 = Ok_sumMetricModel50Nghbr - PM10,
+         Diff_OkPredAll = Ok_sumMetricModelAll - PM10,
+         Diff_UKPred50 = Uk_sumMetricModel10Nghbr - PM10,
+         Diff_UKPred50 = Uk_sumMetricModel50Nghbr - PM10,
+         Diff_UKPredAll = Uk_sumMetricModelAll - PM10
+         ) %>%
+  dplyr::select(Date, starts_with("Diff"))
+
+df_diff <- df_diff %>%
+  pivot_longer(
+    cols = -Date,       # Select all columns except 'Date'
+    names_to = "variable",
+    values_to = "Value"
+  )
+
+ggplot(df_diff, aes(x = variable, y = Value, fill = variable)) +
+  geom_boxplot(outlier.shape = 16, outlier.size = 2, alpha = 0.6) + 
+  labs(title = "Distribution of Differences (Observed vs. Predicted)",
+       x = "Prediction Models",
+       y = "Difference (PM10 - Predicted Value)") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1),
+        legend.position = "none")
+```
+
+
+
+
+
+```{r}
+
+
+
+df1 %>% select(PM10,Station, Date,Ok_sumMetricModelAll, Ok_sumMetricModel10Nghbr,Ok_sumMetricModel50Nghbr )
+df2 %>% select(PM10,Station, Date,Uk_sumMetricModelAll, Uk_sumMetricModel10Nghbr,Uk_sumMetricModel50Nghbr )
+
+df <- dfOK %>% dplyr::filter(Station %in% station ) %>% dplyr::select(PM10,Station, Date,Ok_sumMetricModelAll, Ok_sumMetricModel10Nghbr,Ok_sumMetricModel50Nghbr)  %>%   left_join(dfUK %>% dplyr::filter(Station %in% station ) %>% dplyr::select(PM10,Station, Date,Uk_sumMetricModelAll, Uk_sumMetricModel10Nghbr,Uk_sumMetricModel50Nghbr),  by = c("Date"="Date","PM10"="PM10"), )
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+```{r}
+df6 <- df4 %>% left_join(df5,  by = c("Date"= "Date", "Observed"= "Observed") )
+```
+
+```{r}
+tw1 <- index(stfdf_uk@time)[index(stfdf_uk@time) >= "2022-01-15" & index(stfdf_uk@time) <= "2022-04-15"]
+```
+
+
+
+```{r}
+loc <- "32399" # Numero della stazione per cui creare il grafico
+tw <- index(stfdf@time)[index(stfdf@time) >= "2022-01-15" & index(stfdf@time) <= "2022-04-15"]
+df4 <- data.frame(
+  Date = as.Date(tw),
+  Observed = as.numeric(stfdf[3, tw][, "PM10"]),
+  OkPred10 = as.numeric(stfdf[3, tw][, "productsumModel10Nghbr"]),
+  OkPred50 = as.numeric(stfdf[3, tw][, "productsumModel50Nghbr"])
+)
+df5<- data.frame(
+  Date = as.Date(tw),
+  Observed = as.numeric(stfdf_uk[3, tw][, "PM10"]),
+  UKPredAll = as.numeric(stfdf_uk[3, tw][, "sumMetricModel10Nghbr"]),
+  UKPred50 = as.numeric(stfdf_uk[3, tw][, "sumMetricModel50Nghbr"])
+)
+df6 <- df4 %>% left_join(df5,  by = c("Date"= "Date", "Observed"= "Observed") )
+# Converti in formato long per ggplot
+df_lon <- melt(df6, id.vars = "Date")
+
+ggplot(df_lon, aes(x = Date, y = value, color = variable, linetype = variable, size = variable)) +
+  geom_line() +  # Linee per le due serie
+  labs(title = paste("Location", stfdf@sp@data$Station[6]),
+       x = "Date", y = "PM10 Levels") +
+  scale_x_date(date_labels = "%Y-%m-%d", date_breaks = "15 days", expand = expansion(mult = c(0.07, 0.07))) +
+  scale_color_manual(values = c("Observed" = "darkgreen", "OkPred10" = "#8c564b", "OkPred50" = "coral", "UKPredAll"="black", "UKPred50"= "#1f77b4")) + # Colore più chiaro
+  scale_linetype_manual(values = c("Observed" = "solid", "OkPred10" = "solid", "OkPred50" = "solid","UKPredAll"= "solid", "UKPred50"= "solid" )) +  # Linee solide
+  scale_size_manual(values = c("Observed" = 0.6, "OkPred10" = 0.75,"OkPred50" = 0.75,"UKPredAll"= 0.75, "UKPred50"= 0.75 )) +  # "Observed" più sottile
+  theme_minimal() +  
+  theme(legend.title = element_blank(), 
+        legend.position = c(0.35, 0.95), legend.direction= "horizontal")
+```
+
+```{r}
+df_diff <- df6 %>%
+  mutate(Diff_OkPred10 = OkPred10 - Observed,
+         Diff_OkPred50 = OkPred50 - Observed,
+         Diff_UKPredAll = UKPredAll - Observed,
+         Diff_UKPred50 = UKPred50 - Observed) %>%
+  dplyr::select(Date, starts_with("Diff"))
+
+df_long <- melt(df_diff, id.vars = "Date")
+
+ggplot(df_long, aes(x = Date, y = value, color = variable)) +
+  geom_line() +
+  labs(title = "Differenza tra Previsioni e Valori Osservati",
+       x = "Data", y = "Errore di Previsione") +
+  scale_color_manual(values = c("#E69F00", "#56B4E9", "#009E73", "#D55E00")) +
+  theme_minimal()
+
+ggplot(df_melt, aes(x = Prediction, y = Difference, fill = Prediction)) +
+  geom_boxplot() +
+  labs(title = "Distribuzione degli Errori di Previsione",
+       x = "Modello di Previsione", y = "Errore") +
+  scale_fill_manual(values = c("#E69F00", "#56B4E9", "#009E73", "#D55E00")) +
+  theme_minimal()
+```
+
+```{r}
+df_melt <- df6 %>%
+  mutate(Diff_OkPred10 = OkPred10 - Observed,
+         Diff_OkPred50 = OkPred50 - Observed,
+         Diff_UKPredAll = UKPredAll - Observed,
+         Diff_UKPred50 = UKPred50 - Observed) %>%
+  dplyr::select(Diff_OkPred10, Diff_OkPred50, Diff_UKPredAll, Diff_UKPred50) %>%
+  gather(key = "Prediction", value = "Difference")
+
+ggplot(df_melt, aes(x = Prediction, y = Difference, fill = Prediction)) +
+  geom_boxplot() +
+  labs(title = "Distribuzione degli Errori di Previsione",
+       x = "Modello di Previsione", y = "Errore") +
+  scale_fill_manual(values = c("#E69F00", "#56B4E9", "#009E73", "#D55E00")) +
+  theme_minimal()
+```
+
+
+```{r}
+#data <-stfdf@data
+#write.csv(df_pred1, "C:/Users/samir/Downloads/dati_tesi/predfinalissimiUK.csv", row.names = FALSE)
+```
+
+
+#######################################################################################################
+
+```{r}
+
+df1 <- read_csv("C:/Users/samir/Downloads/dati_tesi/dataset_trainV.csv",show_col_types = FALSE, )  %>% dplyr::select(-ZoneType ,-StationType ,-Altitude, -Source, -unique_id, -Long, -Lat, -season) %>% mutate(date = as.Date(date)) %>%
+  rename(DatetimeBegin = date,
+         Station= StationName)
+df <- read_csv("C:/Users/samir/Downloads/dati_tesi/df_totale.csv",show_col_types = FALSE )
+df <- df %>% dplyr::select("DatetimeBegin", "Station","PM10", "lag1", "lag7","day_of_month","season","month","day_of_year","Lat","Long","ZoneType","StationType","Altitude","Source","Continuous_urban_fabric","Discontinuous_urban_fabric") %>%  left_join(df1, by= c("DatetimeBegin", "Station" ) )
+```
+
+
+```{r}
+df <- read_csv("C:/Users/samir/Downloads/dati_tesi/df_totale.csv",show_col_types = FALSE )
+```
+
+
+```{r}
+
+df_iqr <- df %>%
+  group_by(Source) %>%
+  summarize(
+    Q1 = quantile(PM10, 0.25, na.rm = TRUE),
+    Q3 = quantile(PM10, 0.75, na.rm = TRUE),
+    IQR_value = Q3 - Q1,
+    lower_bound = Q1 - 1.5 * IQR_value,
+    upper_bound = Q3 + 1.5 * IQR_value
+  )
+
+df <- df %>%
+  left_join(df_iqr, by = "Source") %>%
+  mutate(
+    PM10 = pmax(pmin(PM10, upper_bound), lower_bound)  # Sostituisce outlier
+  ) %>%
+  select(-Q1, -Q3, -IQR_value, -lower_bound, -upper_bound) 
+```
+
+```{r}
+df$id <- df$Station
+```
+
+
+
+```{r}
+df_land <- read_csv("C:/Users/samir/Downloads/dati_tesi/landcov_sums.csv",show_col_types = FALSE ) 
+df_land<- pivot_wider(df_land, names_from = landcov, values_from = total_sum, id_cols= StationName, values_fill= list(total_sum=0)) %>% rename(Station = StationName) 
+  
+```
+
+
+
+```{r}
+df <- df %>% left_join(df_land, by = "Station")  %>% rename (Continuous_urban_fabric= "Continuous urban fabric",
+            Discontinuous_urban_fabric ="Discontinuous urban fabric",
+            Industrial_commercial_units= "Industrial or commercial units",
+            Road_Rail = "Road and rail networks and associated land",
+            Non_irrigated_arable_land ="Non-irrigated arable land",
+            Green_urban_areas= "Green urban areas")
+```
+
+
+
+```{r}
+
+
+covariates <- df[,c(  "Temp", "Umidit", "VelVentoMedia", "Rad" ,"Source","StationType", "u_media","v_media", "DirezioneMedia",  "day_of_year","Continuous_urban_fabric", "Discontinuous_urban_fabric",  "Source", "id",
+  "season","day_of_month","lag1", "lag7","month")]
+
+df$DatetimeBegin <- as.POSIXct(df$DatetimeBegin, format = "%Y-%m-%d")
+df <- df[order(df$Station, df$DatetimeBegin), ]
+# Crea oggetto SpatialPoints con CRS EPSG:4326 (lat/lon)
+stations <- unique(df[, c("Lat", "Long", "Station")])
+sp::coordinates(stations) <- ~ Long + Lat
+sp::proj4string(stations) <- sp::CRS("+init=epsg:4326")  # Sistema originale (lat/lon)
+
+# Trasforma in EPSG:3035 (proiezione metrica)
+stations <- sp::spTransform(stations, sp::CRS("+init=epsg:3035"))
+
+# Definisci la sequenza temporale
+time_seq <- seq(
+  from = as.POSIXct("2022-01-01"),
+  to = as.POSIXct("2023-12-31"),
+  by = "day"
+)
+#covariates <- df_scaled[, c( "maxRad", "Temp", "Umidit", "maxUmidit", "Prec","VelVentoMedia", 
+#  "u_media","v_media", "DirezioneMedia", "Source", "Continuous_urban_fabric", 
+#  "Discontinuous_urban_fabric", "Industrial_or_commercial_units", 
+#  "Road_and_rail_networks_and_associated_land","Non_irrigated_arable_land",
+#  "season","day_of_month","lag1",   
+#"Temp_season")]
+
+data_stfdf <- data.frame(
+  PM10 =  df$PM10 
+  ,covariates  # Tutte le variabili trasformate
+)
+
+# Creiamo l'oggetto STFDF
+stfdf_uk <- spacetime::STFDF(
+  sp = stations,  # Coordinate delle stazioni
+  time = time_seq,  # Sequenza temporale
+  data = data_stfdf  # Dataset con PM10 + covariate
+)
+lambda <- 0.3838384
+stfdf_uk@data$PM10_trans <- (stfdf_uk@data$PM10^lambda - 1) / lambda
+#semivariogramma empirico
+formula_kriging <- PM10_trans ~ -1+  Temp +u_media + v_media +Umidit +VelVentoMedia + season +lag7   + lag1 +day_of_year + Source 
+# Creazione del variogramma empirico per Universal Kriging
+
+#PM10 ~- 1 + Temp +u_media + v_media +Umidit +VelVentoMedia + season +lag7  + lag1 + lag1:day_of_year + Continuous_urban_fabric 
+# Temp+Umidit+VelVentoMedia+Rad+Source+StationType+u_media+v_media+DirezioneMedia+season+day_of_month+lag1+lag7+month+Continuous_urban_fabric+ Discontinuous_urban_fabric
+st_variogram_uk <- variogramST(
+  formula = formula_kriging,  
+  data = stfdf_uk,          
+  tlags = 0:3,           
+  cutoff = 4356.324,    
+  width = 1000,        
+  assumeRegular = TRUE   
+) 
+linStAnisotropia_uk <- estiStAni(
+    st_variogram_uk,
+    interval = c(0, 200000)  # Range per la stima dell'anisotropia
+)
+linStAnisotropia_uk
+st_variogram_uk$dist  <- st_variogram_uk$dist/1000
+st_variogram_uk$avgDist  <-st_variogram_uk$avgDist/1000
+st_variogram_uk$spacelag <- st_variogram_uk$spacelag/1000
+linStAnisotropia_uk <- linStAnisotropia_uk/1000
+
+
+
+```
+
+ 
+
+ 
+```{r}
+
+modello_sumMetric <-vgmST("sumMetric", space = vgm(10, "Gau", 40, 0.2), time = vgm(100, "Gau", 4, 8),
+                        joint = vgm(10, "Gau", 3000, 90), stAni = linStAnisotropia_uk)
+
+fitsumMetricModel <- fit.StVariogram(st_variogram_uk,modello_sumMetric , 
+                fit.method = 6, stAni=linStAnisotropia_uk,
+                 method = "L-BFGS-B", 
+                 lower = c(sill.s = 0.1,  range.s = 10,  nugget.s = 0.1,
+                           sill.t = 0.1,  range.t = 0.1,   nugget.t = 0.1,
+                           sill.st= 0.1, range.st = 10, nugget.st = 0.1, 
+                           anis = 400),
+                             upper = c(
+    sill.s = 500,  range.s = 50, nugget.s = 10,  
+    sill.t = 500,  range.t = 10,  nugget.t = 10,  
+    sill.st = 500, range.st = 500, nugget.st =100, 
+    anis = 2000
+  ),
+                 control = list(parscale = c(1,100,1,1,0.5,1,1,100,1,100),
+                               maxit=1e4))
+
+cat("fitsumMetricModel", attr(fitsumMetricModel, "MSE"), "\n")
+```
+ 
+```{r}
+extractPar(fitsumMetricModel)
+```
+ 
+ 
+###########1
+
+```{r}
+modello_sumMetric <-vgmST("sumMetric", space = vgm(10, "Gau", 40, 0.2), time = vgm(100, "Gau", 4, 8),
+                        joint = vgm(10, "Gau", 3000, 90), stAni = linStAnisotropia_uk)
+
+fitsumMetricModel <- fit.StVariogram(st_variogram_uk,modello_sumMetric , 
+                fit.method = 6, stAni=linStAnisotropia_uk,
+                 method = "L-BFGS-B", 
+                 lower = c(sill.s = 1,  range.s = 10,  nugget.s = 1,
+                           sill.t = 1,  range.t = 0.1,   nugget.t = 1,
+                           sill.st= 1, range.st = 10, nugget.st = 1,
+                           anis = 400),
+     upper = c(
+  sill.s = 50,  range.s = 30, nugget.s = 10,
+  sill.t = 50,  range.t = 10,  nugget.t = 10,
+  sill.st = 50, range.st = 500, nugget.st = 50,
+  anis = 1000
+)
+# ,
+#                  control = list(parscale = c(1,100,1,1,0.5,1,1,100,1,100),
+#                                maxit=1e4)
+)
+
+cat("fitsumMetricModel", attr(fitsumMetricModel, "MSE"), "\n") #4.015084
+```
+
+```{r}
+extractPar(fitsumMetricModel)
+```
+
+
+```{r}
+# all
+target <- as(stfdf_uk[,,"PM10"],"STFDF") 
+res <- matrix(NA, length(stfdf_uk@sp), 730)
+for(loc in 1:length(stfdf_uk@sp)) { # loc <- 1
+  cat("Location", loc, "\n")
+  res[loc,!is.na(target[loc, 1:730])[,"PM10"]] <- krigeST(PM10~- 1 + Temp +u_media + v_media +Umidit +VelVentoMedia + season+ lag7  + lag1+Continuous_urban_fabric,
+                                                                                                                 data=stfdf_uk[(1:length(stfdf_uk@sp))[-loc],], 
+                                  newdata=stfdf_uk[loc, 1:730, drop=F], 
+                                  fitsumMetricModel, lambda = 0.3838384,
+                                  stAni=linStAnisotropia_uk)$var1.pred
+}
+
+stfdf_uk@data$sumMetricModel50Nghbr <- as.vector(res)[!is.na(as.vector(res))]
+```
+```{r}
+data <- stfdf_uk@data
+```
+
+
+```{r}
+data <- data %>% rename(Station= "id") %>% left_join(df %>% dplyr::select("DatetimeBegin","Station" ,"PM10","day_of_year","lag1"), by= c("Station" ,"PM10","day_of_year", "lag1"))
+```
+
+```{r}
+df %>%
+  count(Station, PM10, day_of_year) %>%
+  filter(n > 1)
+```
+```{r}
+df %>% dplyr::filter(Station== "24644" & PM10 == 9.95000)
+```
+
+
+```{r}
+  space  <- data.frame(partial_sill = round(fitsumMetricModel$space[2,2],2), model = fitsumMetricModel$space[2,1],  range= paste(fitsumMetricModel$space[2,3], "km"), nugget = fitsumMetricModel$space[1,2], tipo = "space")
+  time  <- data.frame(partial_sill = round(fitsumMetricModel$time[2,2],2), model = fitsumMetricModel$time[2,1],  range= paste(fitsumMetricModel$time[2,3], "km"), nugget = fitsumMetricModel$time[1,2],tipo = "time")
+  joint  <- data.frame(partial_sill = round(fitsumMetricModel$joint[2,2],2), model = fitsumMetricModel$joint[2,1],  range= paste(fitsumMetricModel$joint[2,3], "km"), nugget = fitsumMetricModel$joint[1,2],tipo = "joint")
+
+  fit_table <-  rbind(space, time, joint)
+  fit_table$sp_temp_joint.stAni <- NA  # Imposta tutte le righe a NA
+  fit_table$sp_temp_joint.stAni[1] <- fitsumMetricModel$stAni
+  
+  fit_table  
+  
+```
+
+```{r}
+plot(st_variogram_uk, fit = fitsumMetricModel)
+```
+
+ 
+```{r}
+colnames(stfdf_uk@data)
+
+```
+
+ 
+```{r}
+stfdf_uk <- stfdf_uk[,,-19 ] #togliamo PM10_trans
+```
+ 
+```{r}
+
+```
+
+
+```{r}
+dftestland <- read_csv("C:/Users/samir/Downloads/dati_tesi/dftestland.csv",show_col_types = FALSE, ) %>%    rename (Continuous_urban_fabric= "Continuous urban fabric",
+            Discontinuous_urban_fabric ="Discontinuous urban fabric",
+            Industrial_commercial_units= "Industrial or commercial units",
+            Road_Rail = "Road and rail networks and associated land",
+            Non_irrigated_arable_land ="Non-irrigated arable land",
+            Green_urban_areas= "Green urban areas",
+            DatetimeBegin= "date",
+            Station="id") %>% dplyr::select("Temp" ,  "Umidit","VelVentoMedia" ,  "Source"   
+,"u_media","v_media" , "day_of_year" ,"Continuous_urban_fabric","Discontinuous_urban_fabric","season"               
+,"lag1","lag7","Station","Lat", "Long","DatetimeBegin", "PM10" )
+
+#dftestland$id <- dftestland$Station
+```
+
+
+
+```{r}
+unique(dfslice$DatetimeBegin)
+
+```
+
+
+```{r}
+
+dfslice <- datas %>% rename(Station= "id") %>% left_join(dftestland %>% dplyr::select(Station, DatetimeBegin, Lat, Long), by = c("Station", "DatetimeBegin")) %>% select(-"ok" , -"metricModelAlltutto")
+```
+
+
+```{r}
+stations
+```
+
+
+
+```{r}
+# dfslice <- dftestland %>% dplyr::filter(date >=  as.Date("2023-01-01") & date <=  as.Date("2023-12-31"))
+# dfslice <- dftestland %>% dplyr::filter(DatetimeBegin >=  as.Date("2023-01-01") & DatetimeBegin <=  as.Date("2023-12-31")  )
+#,   Station %in%  c(239, 240, 241, 242) 
+#,   Station %in%  c(373, 374, 417, 418) 
+#class(df$DatetimeBegin)
+
+
+
+
+dfslice$DatetimeBegin <- as.POSIXct(dfslice$DatetimeBegin, format = "%Y-%m-%d")
+dfslice <- dfslice[order(dfslice$Station, dfslice$DatetimeBegin), ]
+# Crea oggetto SpatialPoints con CRS EPSG:3035 (lat/lon)
+stations <- unique(dfslice[, c("Lat", "Long", "Station")])
+sp::coordinates(stations) <- ~ Long + Lat
+sp::proj4string(stations) <- sp::CRS("+init=epsg:3035")  # Sistema originale (lat/lon)
+
+dfslice <- dfslice %>% rename(id= "Station")
+
+#Definisci la sequenza temporale
+# time_seq <- seq(
+#   from = as.POSIXct("2023-01-01"),
+#   to = as.POSIXct("2023-12-31"),
+#   by = "day"
+# )
+
+time_seq <- as.POSIXct(c("2023-03-27", "2023-08-07"), tz = "CET") %>%  sort()
+covariates <- dfslice[,c( "Temp" , "id", "Umidit","VelVentoMedia" ,  "Source", 
+"u_media","v_media" , "day_of_year" ,"Continuous_urban_fabric","Discontinuous_urban_fabric","season"               
+,"lag1","lag7","DatetimeBegin")]
+data_stfdf_pred <- data.frame(
+  PM10 =  dfslice$PM10 
+  ,covariates  # Tutte le variabili trasformate
+)
+
+
+# Associa i dati spazio-temporali
+stfdf_pred <- spacetime::STFDF(
+  sp = stations,  # Coordinate delle stazioni
+  time = time_seq,  # Sequenza temporale
+  data = data_stfdf_pred  # Valori PM10
+)
+```
+
+```{r}
+table(data_stfdf_pred$DatetimeBegin)
+```
+
+
+
+```{r}
+stfdf_pred@data
+```
+
+```{r}
+length(stfdf_pred@time)
+```
+
+```{r}
+length(stfdf_pred@sp)
+```
+```{r}
+## con fondo
+back_boxcox <- function(pred, var, lambda = 0.3838384) {
+  raw <- (lambda * pred + 1)^(1 / lambda)
+  correction <- ((1 - lambda) * var) / (2 * (lambda * pred + 1)^2)
+  pred_adj <- raw + correction
+  pred_adj[pred_adj < 0.1] <- 0.1  # evitare negativi
+  return(pred_adj)
+}
+```
+
+```{r}
+back_coxcox <- function(pred = NULL, sigma =NULL, lambda= 0.3838384 ){
+  min_value = 0.1
+  raw <- (lambda * pred + 1)^(1/lambda)
+  bias_adj <- 1+ sigma * ((1- lambda)^2/2) * (lambda * pred +1)^(2*(1- lambda))
+  
+  pred_adj  <-  raw * bias_adj
+  pred_adj <- pmax(pred_adj, min_value)
+  return(pred_adj)
+}
+```
+
+```{r}
+back_boxcox <- function(pred = NULL, sigma = NULL, lambda = 0.3838384) {
+  min_value <- 0.1
+  base <- lambda * pred + 1
+  raw <- base^(1 / lambda)
+  bias_adj <- 1 + (sigma * (1 - lambda)) / (2 * base^2)
+  
+  pred_adj <- raw * bias_adj
+  pred_adj <- pmax(pred_adj, min_value)  # evita valori negativi
+  return(pred_adj)
+}
+```
+
+
+#####altro
+
+```{r}
+res_pred <- matrix(NA, length(stfdf_pred@sp),  365) 
+res_se <- matrix(NA, nrow = length(stfdf_pred@sp), ncol = 365)
+for(loc in 1:length(stfdf_pred@sp)) {
+ print(loc)
+# Model estimation and spatio-temporal prediction
+kriged  <- krigeST(PM10_trans ~ -1+ Temp +u_media + v_media +Umidit +VelVentoMedia + season +lag7  + lag1 +day_of_year, 
+                data=stfdf_uk, 
+                newdata= stfdf_pred[loc, 1:365, drop=F], 
+                fitsumMetricModel,
+                stAni=linStAnisotropia_uk,
+    computeVar = TRUE)
+
+ res_pred[loc, ] <- kriged$var1.pred
+  res_se[loc, ] <- kriged$var1.var
+}
+
+
+#res_backtransformed <- back_coxcox(pred = as.vector(res_pred), se = as.vector(res_se))
+
+#stfdf_pred@data$metricModelAlltutto <- as.vector(res)[!is.na(as.vector(res))]
+```
+
+```{r}
+res_backtransformed <- back_coxcox(pred = as.vector(res_pred), sigma = as.vector(res_se))
+```
+
+
+
+```{r}
+stfdf_pred@data$PM10_kriged <- res_backtransformed  
+```
+
+
+```{r}
+#write.csv(df_pred, "C:/Users/samir/Downloads/dati_tesi/predfinale_kriginkUK.csv", row.names = FALSE)
+```
+
+###meglio
+
+
+
+```{r}
+res <- matrix(NA, length(stfdf_pred@sp),  2) #time
+
+for(loc in 1:length(stfdf_pred@sp)) {
+ print(loc)
+# Model estimation and spatio-temporal prediction
+res[ loc,] <- krigeST(PM10 ~ Temp +u_media  +Umidit +VelVentoMedia + season +lag7  + lag1 + day_of_year+ Source ,
+                data=stfdf_uk, 
+                newdata= stfdf_pred[loc, 1:2, drop=F], 
+                fitsumMetricModel,  lambda= 0.3838384,
+                stAni=linStAnisotropia_uk)$var1.pred
+
+
+}
+stfdf_pred@data$metricModelAlltutto <- as.vector(res)[!is.na(as.vector(res))] 
+# + v_media +  season*v_media
+```
+
+
+
+```{r}
+#girare una volta
+data1 <- stfdf_pred@data
+```
+
+
+```{r}
+data <- stfdf_pred@data
+```
+
+```{r}
+data  <- data  %>%
+  mutate(metricModelAlltutto = ifelse(row_number() == 2, 8.321, metricModelAlltutto))
+```
+
+
+
+```{r}
+data %>% left_join(df %>% dplyr::select("PM10","DatetimeBegin" ,"Station" ,"Lat" ,"Long","Discontinuous_urban_fabric","Continuous_urban_fabric"  ), by= c("PM10","DatetimeBegin","Discontinuous_urban_fabric","Continuous_urban_fabric" ))
+```
+
+
+
+
+
+```{r}
+# data1 <- data %>% dplyr::select("PM10","Temp","Umidit","VelVentoMedia","Source", "u_media", "v_media","day_of_year","lag1","lag7","DatetimeBegin","metricModelAlltutto", "id","season","Continuous_urban_fabric"  ,  "Discontinuous_urban_fabric" )  %>% mutate(ok= ifelse(metricModelAlltutto <0, 0,1))   
+
+data1 <- data %>% dplyr::select("PM10","Temp","Umidit","VelVentoMedia","Source", "u_media", "v_media","day_of_year","lag1","lag7","DatetimeBegin","metricModelAlltutto", "id","season","Continuous_urban_fabric"  ,  "Discontinuous_urban_fabric" )  %>% mutate(ok= ifelse(metricModelAlltutto <0, 0, 3))   
+```
+
+```{r}
+table(data1$ok)
+```
+```{r}
+data1 %>% dplyr::filter(ok==0)  %>% dplyr::pull(id) %>% unique() %>% cat(sep=", ")
+```
+
+
+
+```{r}
+data2 <- data %>% dplyr::select("PM10","Temp","Umidit","VelVentoMedia","Source", "u_media", "v_media","day_of_year","lag1","lag7","DatetimeBegin","metricModelAlltutto", "id","season","Continuous_urban_fabric"  ,  "Discontinuous_urban_fabric" )  %>% mutate(ok= ifelse(metricModelAlltutto <0, 0, 3)) 
+```
+
+```{r}
+#trovo valori negativi
+ data2 %>% group_by(id) %>% summarise(count= sum((ok))) %>% dplyr::filter(count < 9) %>% dplyr::pull(id) %>% cat(sep=", ")
+```
+
+```{r}
+#rigiro i valori negativi
+datas  <- data1 %>% 
+  dplyr::filter( (id %in%  c(357, 358, 359, 360, 361, 362, 363, 364, 365, 366, 367, 368, 369, 370, 371, 372, 373, 374, 375, 376, 377, 378, 379, 380, 381, 382, 383, 384, 385, 386, 387, 388, 389, 390, 391, 392, 393, 394, 395, 396, 397, 398, 399, 400, 401, 402, 403, 404, 405, 406, 407, 408, 409, 410, 411, 412, 413, 414, 415, 416, 417, 418, 419))   & (DatetimeBegin %in% as.POSIXct(c("2023-03-15", "2023-08-06","2023-12-02"))))
+```
+
+```{r}
+#tengo solo i valori positivi di data2 e li integro in data1
+ data2  <- data1 %>% 
+  dplyr::filter( !(id %in%  c(388)))
+```
+
+```{r}
+data1 <- data1 %>% bind_rows(data2)
+```
+
+
+
+
+
+
+```{r}
+#499, 500, 501, 502, 503, 505, 506, 507, 508, 509, 544, 545, 546, 547, 549, 550, 551, 552, 560, 561, 562, 563, 564, 565, 566, 567, 568, 569, 570, 571, 572, 573, 574, 575, 578, 579, 580
+data3 <-  data1 %>%
+  filter(ok == 3) %>%
+  arrange(DatetimeBegin, id, desc(metricModelAlltutto)) %>%
+  group_by(PM10, DatetimeBegin, id) %>%
+  slice_head(n = 1) %>%
+  ungroup() 
+#%>%  count(id)
+```
+
+```{r}
+ddt1 <- ddt %>% bind_rows(data3)
+```
+
+
+```{r}
+#138 x3 = 414
+data1 %>% 
+  dplyr::filter(ok == 3) %>%
+  
+  dplyr::filter(duplicated(select(., PM10, DatetimeBegin, id)) |
+                duplicated(select(., PM10, DatetimeBegin, id), fromLast = TRUE)) %>%  dplyr::arrange(DatetimeBegin, id,desc(metricModelAlltutto))   %>%
+  distinct(PM10, DatetimeBegin, id, .keep_all = TRUE)
+```
+
+
+
+```{r}
+ddt <- read_csv("C:/Users/samir/Downloads/dt_uk.csv", show_col_types = FALSE)  %>% mutate(ok= ifelse(metricModelAlltutto <0, 0,1))  %>%
+  bind_rows(data1)
+```
+
+
+```{r}
+ddt <- read_csv("C:/Users/samir/Downloads/dt_uk.csv", show_col_types = FALSE)  %>% mutate(ok= ifelse(metricModelAlltutto <0, 0,1))  %>%
+  bind_rows(data1)
+```
+
+
+```{r}
+table(ddt$ok)
+```
+
+
+```{r}
+write.csv(ddt1, "C:/Users/samir/Downloads/dt_uk.csv", row.names = FALSE)
+```
+
+
+```{r}
+ddt <- read_csv("C:/Users/samir/Downloads/dt_uk.csv", show_col_types = FALSE) 
+```
+
+
+```{r}
+data1 %>% dplyr::filter(ok == 0) %>%  pull(id) %>% unique() %>% cat(sep = ", ")
+```
+
+
+
+
+
+```{r}
+data1 %>% dplyr::filter(ok == 0) %>%  pull(DatetimeBegin) %>% table()
+
+#data1 %>% dplyr::filter((ok == 0) & (DatetimeBegin %in% as.POSIXct(c("2023-08-06")))) 
+#2023-12-23  2023-11-26 2023-01-10 2023-08-29 2023-11-25
+   #     "2023-03-15", "2023-08-06","2023-12-02"
+
+```
+
+```{r}
+ddt %>% dplyr::filter((ok == 0) & (DatetimeBegin %in% as.POSIXct(c("2023-03-27", "2023-08-07" ) ) )) %>% dplyr::pull(id) %>% unique()  %>% cat(sep=", ")
+ 
+# c(240, 241, 310,311)
+```
+
+
+
+```{r}
+data1 %>% dplyr::filter((ok == 0) & (DatetimeBegin %in% as.POSIXct(c("2023-08-06")))) 
+```
+
+
+```{r}
+datas  <- ddt %>% 
+  dplyr::filter( (id %in%  c(385, 386, 387, 388, 389, 390, 391))   & (DatetimeBegin %in% as.POSIXct(c("2023-03-27", "2023-08-07"))))
+```
+
+```{r}
+table(dfslice$DatetimeBegin)
+```
+
+
+```{r}
+datas  <- ddt %>% 
+  dplyr::filter( (id %in%  c(1, 2, 21, 22, 23))   & (DatetimeBegin %in% as.POSIXct(c("2023-03-27", "2023-08-07"))))
+
+#,"2023-03-27", "2023-08-07"
+```
+
+
+```{r}
+cleaned <- cleaned %>% bind_rows(data)
+```
+
+
+```{r}
+datas <- data1 %>% 
+  dplyr::filter((ok == 0) & (DatetimeBegin %in% as.POSIXct("2023-08-06")))
+```
+
+
+```{r}
+# data1 %>% dplyr::filter(ok == 0) %>% dplyr::pull(DatetimeBegin) %>%
+#   table()
+
+
+data1 <- data1 %>% dplyr::filter( id %in% id_negativi& DatetimeBegin %in% as.POSIXct(c("2023-01-10", "2023-03-15", "2023-03-27", "2023-08-06", "2023-08-07", "2023-08-29", "2023-11-25" ,"2023-12-02")))
+```
+
+```{r}
+ddt %>% dplyr::filter(ok == 0) %>% dplyr::pull(DatetimeBegin) %>%
+   table()
+```
+
+```{r}
+ddt <- ddt %>% dplyr::filter( (id == 300	) &  (DatetimeBegin %in% as.POSIXct(c("2023-08-06", "2023-08-29")))) %>%
+  dplyr::group_by(id, DatetimeBegin) %>%
+  dplyr::filter(is.na(ok) | (!any(is.na(ok)) & row_number() == 1)) %>%
+  ungroup()
+```
+
+
+```{r}
+
+data1 <- data %>%
+  dplyr::filter( id %in% id_negativi& 
+    DatetimeBegin %in% as.POSIXct(c("2023-03-27", "2023-08-07")))
+```
+
+```{r}
+
+#data1<- data1%>% dplyr::filter(ok == 0) %>% dplyr::select(- metricModelAlltutto) 
+```
+
+
+
+```{r}
+ddt <- read_csv("C:/Users/samir/Downloads/dati_tesi/pred_kriginkUK.csv", show_col_types = FALSE) %>%
+  filter(
+    !id %in% id_negativi &
+    !DatetimeBegin %in% as.POSIXct(c("2023-03-27", "2023-08-07"))
+  ) %>%
+  bind_rows(data)
+```
+
+
+
+
+```{r}
+ddt %>%
+  dplyr::filter(duplicated(select(., id, DatetimeBegin))) 
+```
+
+```{r}
+ddt %>% dplyr::filter(  (id %in%300)  &   (DatetimeBegin %in% as.POSIXct(c("2023-08-06"))))
+```
+
+
+```{r}
+ddt <- read_csv("C:/Users/samir/Downloads/dati_tesi/pred_kriginkUK.csv", show_col_types = FALSE) %>%
+  filter(
+    !(id %in% id_negativi & DatetimeBegin %in% as.POSIXct(c("2023-03-27", "2023-08-07")))
+  ) %>%
+  bind_rows(data)
+```
+
+
+
+```{r}
+df_pred <-   read_csv("C:/Users/samir/Downloads/dati_tesi/predfinale_kriginkUK.csv",show_col_types = FALSE, ) %>% mutate(ok= ifelse(metricModelAlltutto <0, 0, 3))  
+```
+
+
+
+```{r}
+df_pred <- df_pred %>% 
+  dplyr::filter( (id %in%  da_exc)   & (DatetimeBegin %in% as.POSIXct(c("2023-03-27","2023-08-07")))) %>% mutate(ok= ifelse(metricModelAlltutto <0, 0, 3)) 
+```
+
+
+
+```{r}
+df_cleaned%>% dplyr::filter( (ok == 0) &(DatetimeBegin %in% as.POSIXct(c("2023-03-27", "2023-08-07")))) %>%
+  left_join(
+    df_pred %>%
+      rename(ok2 = metricModelAlltutto) %>%
+      select(PM10, id, DatetimeBegin, ok2),
+    by = c("PM10", "id", "DatetimeBegin")
+  ) %>% dplyr::select(-ok, -metricModelAlltutto) %>% dplyr::rename(metricModelAlltutto= ok2)
+
+corretti
+```
+
+```{r}
+da_exc <- c(1, 2, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 52, 53, 54, 55, 56, 57, 88, 89, 90, 91, 92, 93, 94, 95, 96, 97, 98, 99, 100, 101, 102, 103, 104, 105, 106, 107, 108, 109, 110, 111, 112, 113, 114, 115, 120, 121, 152, 153, 154, 155, 156, 157, 158, 159, 160, 161, 162, 163, 164, 165, 166, 167, 168, 169, 170, 171, 172, 173, 174, 175, 176, 177, 178, 179, 180, 183, 184, 185, 186, 187, 188, 219, 220, 221, 222, 225, 226, 227, 228, 231, 232, 235, 236, 237, 238, 239, 240, 241, 242, 243, 244, 245, 246, 247, 248, 253, 254, 255, 283, 284, 285, 286, 287, 288, 289, 290, 291, 292, 293, 296, 297, 299, 300, 301, 302, 303, 304, 305, 306, 307, 308, 309, 310, 311, 316, 317, 318, 319, 347, 350, 351, 352, 355, 356, 357, 358, 359, 360, 361, 362, 363, 364, 365, 366, 367, 368, 369, 370, 371, 372, 373, 374, 375, 376, 377, 378, 384, 385, 386, 395, 396, 407, 408, 413, 414, 415, 416, 417, 418, 419, 420, 421, 422, 423, 424, 425, 426, 427, 428, 429, 430, 431, 432, 433, 434, 435, 436, 437, 438, 439, 440, 441, 442, 443, 444, 447, 448, 449, 450, 451, 452, 455, 481, 482, 483, 484, 485, 486, 487, 488, 489, 490, 491, 492, 493, 494, 495, 496, 497, 498, 499, 500, 501, 502, 503, 504, 505, 506, 507, 508, 509, 510, 511, 515, 516, 517, 518, 519, 522, 523, 526, 527, 530, 531, 538, 539, 542, 543, 544, 545, 546, 547, 548, 549, 550, 551, 552, 553, 554, 555, 556, 557, 558, 559, 560, 561, 562, 563, 564, 565, 566, 567, 568, 569, 570, 571, 572, 573, 574, 575, 576, 577, 578, 579, 580, 581, 582, 587, 592, 613, 614, 615, 616, 617, 618, 619, 620, 621, 622, 623, 624, 625, 626, 627, 628, 629, 630, 631, 632, 633, 634, 635, 636, 637, 638, 639, 640, 641, 642, 648, 649, 650, 653, 654, 659, 660, 669, 673, 674, 676, 677, 678, 679, 680, 681, 682, 683, 684, 685, 686, 687, 688, 689, 690, 691, 692, 693, 694, 695, 696, 697, 698, 699, 700, 701, 702, 703, 704, 705, 706, 707, 708, 710, 711, 712, 713, 714, 718, 719,50, 51, 58, 146, 151, 181, 182, 233, 252, 256, 258, 259, 260, 282, 294, 295, 298, 328, 353, 354, 379, 382, 383, 387, 391, 456, 461, 462, 480, 514, 520, 537, 583, 584, 585, 586, 588, 589, 590, 591, 593, 609, 610, 647, 655, 668, 670, 671, 675, 709, 715, 722, 723)
+```
+
+
+```{r}
+cleaned2 <-  cleaned1 %>% rbind(
+ddt %>% dplyr::filter( (id %in% da_exc) & (DatetimeBegin %in% as.POSIXct(c("2023-03-27", "2023-08-07")))) %>% dplyr::select(-ok, - metricModelAlltutto) %>% left_join(df_pred %>% dplyr::select(PM10,id, DatetimeBegin, metricModelAlltutto, ok), by = c("PM10", "id", "DatetimeBegin")))
+#filter(!is.na(ok))
+```
+
+
+```{r}
+ddt %>% dplyr::filter( (id %in% da_exc) & (DatetimeBegin %in% as.POSIXct(c("2023-03-27", "2023-08-07")))) %>% dplyr::select(-ok, - metricModelAlltutto) %>% left_join(df_pred %>% dplyr::select(id, DatetimeBegin, metricModelAlltutto, ok), by = c( "id", "DatetimeBegin"))
+```
+
+```{r}
+ddt %>% filter((id == 58) & DatetimeBegin %in% as.POSIXct(c("2023-03-27", "2023-08-07")))
+```
+
+
+
+```{r}
+df_pred %>% filter((id == 58) & DatetimeBegin %in% as.POSIXct(c("2023-03-27", "2023-08-07")))
+```
+
+
+```{r}
+id_negativi  <- ddt%>% dplyr::filter( (ok == 0) &(DatetimeBegin %in% as.POSIXct(c("2023-03-27", "2023-08-07")))) %>% dplyr::pull(id) %>% unique()
+```
+
+```{r}
+ prova <-  ddt %>% 
+      filter(ok %in% c(1, 3)) %>%
+      group_by(id,DatetimeBegin) %>%
+      slice_min(ok, with_ties = FALSE) %>%
+      ungroup() %>% select(- ok)  %>% rbind(corretti)
+prova
+```
+
+```{r}
+ddt%>%  dplyr::filter( ok %in% c(1,3)) %>% select(- ok) 
+```
+
+
+
+```{r}
+prova %>%
+  count(date_only = as.Date(DatetimeBegin)) %>%
+  filter(n != 723)
+```
+
+```{r}
+cleaned <- ddt %>% 
+      filter(ok %in% c(1, 3)) %>%
+      group_by(id,DatetimeBegin) %>%
+      slice_min(ok, with_ties = FALSE) %>%
+      ungroup()
+cleaned
+```
+
+
+```{r}
+cleaned2 %>%
+  group_by(id, DatetimeBegin) %>%
+  filter(n() > 1) %>%
+  arrange(id, DatetimeBegin) %>%
+  ungroup()
+```
+
+```{r}
+cleaned2 %>%
+  group_by(id) %>%
+  summarise(count = n()) %>%
+  filter(count != 365) 
+```
+```{r}
+cleaned2 %>%
+  group_by(DatetimeBegin) %>%
+  summarise(count = n()) %>%
+  filter(count != 723) 
+```
+
+
+```{r}
+
+```
+
+
+
+
+```{r}
+setdiff(de,da_exc )
+```
+
+
+```{r}
+cleaned2 %>% count(date_only = as.Date(DatetimeBegin)) %>%
+  filter(n != 723)
+```
+
+```{r}
+da_exc <-  cleaned1 %>%
+      filter(as.Date(DatetimeBegin) %in% as.Date(c("2023-03-27", "2023-08-07"))) %>%
+      distinct(id) %>%
+      pull(id)
+  
+
+ddt %>%
+  filter(as.Date(DatetimeBegin) %in% as.Date(c("2023-03-27", "2023-08-07"))) %>%
+  filter(!id %in% da_exc) %>%
+  distinct(id) %>%
+  pull(id) %>% cat(sep=", ")
+   
+``` 
+
+
+```{r}
+ddt %>% filter(!dplyr::filter(DatetimeBegin %in% as.POSIXct(c("2023-03-27", "2023-08-07")))  %>%  distinct(id) %>% dplyr::pull() %in% (cleaned1 %>% dplyr::filter(DatetimeBegin %in% as.POSIXct(c("2023-03-27", "2023-08-07")))  %>%  distinct(id) %>% dplyr::pull()))
+```
+
+
+```{r}
+table(cleaned$ok)
+```
+
+
+```{r}
+cleaned2 <- cleaned2 %>% 
+      filter(ok %in% c(1, 3)) %>%
+      group_by(id,DatetimeBegin) %>%
+      slice_min(ok, with_ties = FALSE) %>%
+      ungroup()
+cleaned2
+```
+
+
+
+
+
+
+```{r}
+table(datas$DatetimeBegin)
+```
+```{r}
+datas <- ddt %>% 
+  dplyr::filter( DatetimeBegin %in% as.POSIXct(c("2023-03-15","2023-08-06","2023-12-02"))) %>%
+      group_by(id,DatetimeBegin) %>%
+      slice_max(ok, with_ties = FALSE) %>%
+      ungroup()
+```
+
+
+```{r}
+df_pred %>%
+  group_by(id, DatetimeBegin) %>%
+  filter(n() > 1) %>%
+  arrange(id, DatetimeBegin) %>%
+  ungroup()
+```
+
+
+```{r}
+ddt %>% count(date_only = as.Date(DatetimeBegin)) %>%
+  filter(n != 723)
+```
+
+
+```{r}
+prova %>% dplyr::filter(DatetimeBegin %in% as.POSIXct(c("2023-03-15"))) %>% 
+  group_by(id) %>%
+  summarise(n = n()) %>% arrange(desc(n))
+```
+
+```{r}
+ddt %>% dplyr::filter(DatetimeBegin %in% as.POSIXct(c("2023-03-15"))) %>% group_by(ok)%>%
+  summarise(n = n()) %>% arrange(desc(n))
+```
+
+
+```{r}
+ddt %>% dplyr::filter(DatetimeBegin %in% as.POSIXct(c("2023-03-15"))) %>% 
+  group_by(id) %>%
+  summarise(n = n()) %>% arrange(desc(n))
+```
+
+
+```{r}
+table(datas$DatetimeBegin)
+```
+
+```{r}
+ddt%>%  dplyr::filter( ok %in% c(1,3)) %>%
+  filter(as.Date(DatetimeBegin) == as.Date("2023-01-10")) %>% group_by(id) %>%
+  summarise(n = n(), .groups = "drop") %>%
+  filter(n > 1)
+```
+
+
+```{r}
+prova %>% dplyr::filter(DatetimeBegin %in%  as.POSIXct(c("2023-01-10")))
+```
+
+
+
+
+
+```{r}
+ddt%>% dplyr::filter( (ok == 0) &(DatetimeBegin %in% as.POSIXct(c("2023-03-27", "2023-08-07"))))
+```
+
+
+```{r}
+corretti <- ddt%>% dplyr::filter( (ok == 0) &(DatetimeBegin %in% as.POSIXct(c("2023-03-27", "2023-08-07")))) %>%
+  left_join(
+    df_pred %>%
+      rename(ok2 = metricModelAlltutto) %>%
+      select(PM10, id, DatetimeBegin, ok2),
+    by = c("PM10", "id", "DatetimeBegin")
+  ) %>% dplyr::select(-ok, -metricModelAlltutto) %>% dplyr::rename(metricModelAlltutto= ok2)
+
+corretti
+```
+```{r}
+table(corretti$id)
+```
+
+
+
+```{r}
+ok <- df_pred %>% dplyr::filter( date %in% as.POSIXct(c("2023-03-27", "2023-08-07")))
+```
+
+```{r}
+#263895
+ 263729 + 166
+```
+
+
+```{r}
+ vars <- c("PM10","Temp","Umidit","VelVentoMedia","Source", "u_media", "v_media","lag1","lag7")
+
+for (i in vars) {
+  cat("\n", i, "\n")
+  
+  if (1 %in% data1$ok) {
+    range_pos <- range(data1[data1$ok == 1, i, drop = TRUE], na.rm = TRUE)
+    cat("V.positivi: ", range_pos, "\n")
+  }
+  
+  if (0 %in% data1$ok) {
+    range_neg <- range(data1[data1$ok == 0, i, drop = TRUE], na.rm = TRUE)
+    cat("V.negativi: ", range_neg, "\n")
+  }
+}
+```
+
+```{r}
+if (1 %in% data1$ok)
+```
+
+
+```{r}
+# 4,254 rows
+prova <- data %>% dplyr::filter(metricModelAlltutto < 0) %>% left_join(dftestland  %>%  rename(id= "Station")%>% dplyr::filter(DatetimeBegin >=  as.Date("2023-01-01") & DatetimeBegin <=  as.Date("2023-12-31") ) %>% dplyr::select("PM10","DatetimeBegin" ,"id" ,"Lat" ,"Long") , by= c("PM10","DatetimeBegin", "id"))  %>% distinct(id, Lat, Long)
+```
+
+
+```{r}
+milano <-readRDS(
+  "C:/Users/samir/Downloads/dati_tesi/LAU.rds")%>% dplyr::filter( .data$NUTS3_ID == "ITC4C" & .data$LAU_NAME %in% "Milano") %>% rename(geometry = Lau_geometry )  %>% st_transform(milano, crs = 3035)
+
+
+prova <- prova  %>%
+  sf::st_as_sf(coords = c("Long", "Lat"), crs = 3035)
+stazioni_aria <- read_csv("C:/Users/samir/Downloads/dati_tesi/info_stazioni_aria.csv",show_col_types = FALSE, ) %>%
+  sf::st_as_sf(coords = c("Long", "Lat"), crs = 4326)  %>% st_transform(milano, crs = 3035)
+```
+
+
+```{r}
+stazioni_aria$tipo <- "Stazioni training"
+prova$tipo <- "Stazioni predette"
+
+ggplot() +
+  geom_sf(data = milano, fill = "gray", color = "black", alpha = 0.5) +
+  geom_sf(data = stazioni_aria, fill = "blue", aes(color = tipo), alpha = 0.5) +
+  geom_sf(data = prova, fill = "red", aes(color = tipo), alpha = 0.5) +
+ 
+     scale_color_manual(
+    name = "Legenda stazioni",
+    values = c("Stazioni training" = "blue", "Stazioni predette" = "red")
+  ) 
+```
+
+
+
+```{r}
+df_pred %>% left_join(dftestland %>% dplyr::filter(DatetimeBegin >=  as.Date("2023-01-01") & DatetimeBegin <=  as.Date("2023-12-31") ) %>% dplyr::select("PM10","DatetimeBegin" ,"Station" ,"Lat" ,"Long" ), by= c("PM10","DatetimeBegin"))
+```
+
+
+
+```{r}
+model_fit <- lm(formula_kriging, data = stfdf_uk@data)
+residui <- residuals(model_fit)
+```
+
+
+```{r}
+summary(model_fit)
+```
+
+```{r}
+mean(residui)
+```
+```{r}
+vars <- c("Temp", "Umidit", "VelVentoMedia", "u_media", "v_media", 
+          "lag1", "lag7", "Continuous_urban_fabric", "Discontinuous_urban_fabric")
+
+for (v in vars) {
+  cat("\n", v, "\n")
+  cat("Train: ", range(df[[v]], na.rm = TRUE), "\n")
+  cat("Test : ", range(dftestland[[v]], na.rm = TRUE), "\n")
+}
+#length(unique(dftestland$Discontinuous_urban_fabric))  603
+#length(unique(dftestland$Continuous_urban_fabric)) 291
+```
+
+
+```{r}
+df_pred <-   read_csv("C:/Users/samir/Downloads/dati_tesi/predfinalissimiUK.csv",show_col_types = FALSE, )
+```
+
+
+```{r}
+df_pred1 <-  df_pred %>% rename(Station="id") %>% left_join(dftestland %>% dplyr::filter(DatetimeBegin >=  as.Date("2023-01-01") & DatetimeBegin <=  as.Date("2023-12-31") ) %>% dplyr::select("PM10","DatetimeBegin" ,"Station" ,"Lat" ,"Long" ), by= c("PM10","DatetimeBegin","Station"))
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

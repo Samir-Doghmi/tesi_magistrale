@@ -1,0 +1,873 @@
+---
+title: "Untitled"
+output: html_document
+date: "2025-03-01"
+---
+
+```{r}
+library(dplyr)
+library(sf)
+library(tidyverse)
+library(imputeTS)
+library(ggplot2)
+library(mgcv)
+library(readr)
+```
+
+```{r}
+df_land <- read_csv("C:/Users/samir/Downloads/dati_tesi/landcov_sums.csv",show_col_types = FALSE ) 
+df_land<- pivot_wider(df_land, names_from = landcov, values_from = total_sum, id_cols= StationName, values_fill= list(total_sum=0)) %>% rename(Station = StationName) 
+  
+```
+
+```{r}
+df <- read_csv("C:/Users/samir/Downloads/dati_tesi/df_totale.csv",show_col_types = FALSE ) %>%
+  dplyr::select(-"Continuous_urban_fabric" ,-"Discontinuous_urban_fabric" ,-"Industrial_or_commercial_units" ,-"Road_and_rail_networks_and_associated_land",-"Non-irrigated_arable_land" ,-"Green_urban_areas"   )  %>% left_join(df_land, by = "Station")  %>% rename (Continuous_urban_fabric= "Continuous urban fabric",
+            Discontinuous_urban_fabric ="Discontinuous urban fabric",
+            Industrial_commercial_units= "Industrial or commercial units",
+            Road_Rail = "Road and rail networks and associated land",
+            Non_irrigated_arable_land ="Non-irrigated arable land",
+            Green_urban_areas= "Green urban areas")
+```
+
+
+```{r}
+df_esempio <- df %>% dplyr::filter(DatetimeBegin >=  as.Date("2023-01-01") & DatetimeBegin<=  as.Date("2023-02-01") )
+```
+
+
+
+
+
+
+```{r}
+df_sf <- st_as_sf(df, coords = c("Long", "Lat"), crs = 4326)
+df_sf <- st_transform(df_sf, crs = 3035)
+
+# Aggiungo le nuove coordinate al dataframe
+df$Long <- st_coordinates(df_sf)[,1]
+df$Lat <- st_coordinates(df_sf)[,2]
+```
+
+```{r}
+  lambda <- 0.3838384
+df$PM10_trans <- (df$PM10^lambda - 1) / lambda
+df$lag1 <- (df$lag1 ^lambda - 1) / lambda
+df$lag7  <- (df$lag7^lambda - 1) / lambda
+```
+
+```{r}
+df$season <- as.factor(df$season)
+df$Source <- as.factor(df$Source)
+#df$month <- as.factor(df$month )
+```
+
+
+
+
+
+```{r}
+df <- df %>%
+  mutate(across(where(is.numeric) & !all_of(c("PM10_trans", "DatetimeBegin", "Station", "Source", "season", "Lat", "Long", "day_of_year","day_of_month","month")), ~ scale(.)[,1])) 
+#,"lag1","lag7"
+```
+
+
+```{r}
+df %>% dplyr::filter(DatetimeBegin >= as.Date("2022-06-01")) %>% arrange(DatetimeBegin)
+```
+
+```{r}
+#df <- booox(df=df )
+```
+
+
+#############################################################################à
+
+```{r}
+# df_pred <- read_csv("C:/Users/samir/Downloads/dati_tesi/dftestland.csv",show_col_types = FALSE, )  %>% rename (Continuous_urban_fabric= "Continuous urban fabric",
+#             Discontinuous_urban_fabric ="Discontinuous urban fabric",
+#             Industrial_commercial_units= "Industrial or commercial units",
+#             Road_Rail = "Road and rail networks and associated land",
+#             Non_irrigated_arable_land ="Non-irrigated arable land",
+#             Green_urban_areas= "Green urban areas")
+```
+
+```{r}
+df_pred <-   read_csv("C:/Users/samir/Downloads/dati_tesi/predfinale_kriginkUK.csv",show_col_types = FALSE, )   %>% rename(date= "DatetimeBegin") 
+```
+
+
+
+```{r}
+df_pred <- df_pred %>%
+  arrange(id, date) %>%  # Ordina i dati per Stazione e Tempo
+  group_by(id) %>%  # Raggruppa per stazione
+  mutate(
+    month = month(date),
+    day_of_month = day(date),
+    time = as.numeric(1+ date - min(date))
+  ) %>%
+  ungroup() 
+
+```
+
+
+
+```{r}
+booox <- function( df= NULL ){
+  
+  lambda <- 0.3838384
+df$PM10_trans <- (df$PM10^lambda - 1) / lambda
+df$lag1 <- (df$lag1 ^lambda - 1) / lambda
+df$lag7  <- (df$lag7^lambda - 1) / lambda
+df$season <- as.factor(df$season)
+df$Source <- as.factor(df$Source)
+
+  return(df)
+}
+
+```
+
+```{r}
+#dfsensore$month <- as.factor(dfsensore$month )
+```
+
+
+```{r}
+dfsensoreslice1 <- dfsensore %>% dplyr::filter(date >=  as.Date("2023-01-01") & date <=  as.Date("2023-12-31") )
+```
+
+
+
+```{r}
+dfsensore$Source <- 0
+dfsensore <- booox(df=df_pred )
+
+dfsensoreslice1 <- dfsensore %>% dplyr::filter(date >=  as.Date("2023-01-01") & date <=  as.Date("2023-12-31") ) 
+dfsensore <- dfsensore %>%
+  mutate(across(where(is.numeric) & !all_of(c( "id", "Source", "season", "Lat", "Long", "day_of_year", "time","day_of_month", "month")), ~ scale(.)[,1])) 
+dfsensoreslice <- dfsensore %>% dplyr::filter(date >=  as.Date("2023-01-01") & date <=  as.Date("2023-12-31") ) 
+#"lag1", "lag7"
+```
+
+
+
+
+
+```{r}
+dfsensoreslice <- dfsensoreslice %>% dplyr::select(Long, Lat, day_of_year,Temp,u_media, day_of_month, v_media, Umidit, VelVentoMedia, lag1, lag7, season, Source,time,id,Industrial_commercial_units,Continuous_urban_fabric,month)
+# dfsensoreslice <- dfsensoreslice %>%
+#   mutate(across(where(is.numeric) & !all_of(c( "id", "Source", "season", "Lat", "Long", "day_of_year", "time","day_of_month","lag1", "lag7")), ~ scale(.)[,1]))   s()     4.9289  5.381   9.181 < 2e-16 ***
+
+```
+
+
+```{r}
+pred <- predict(mod11, newdata =  dfsensoreslice,se.fit = TRUE, type = "response") 
+prova <- as.data.frame(pred)
+```
+
+
+```{r}
+prova1<- predizioni_gam(mod =  mod12  , df_pred = dfsensoreslice) %>% mutate(id = as.numeric(id),day_of_year = as.numeric(day_of_year) )
+prova1 <- prova1%>% inner_join(dfsensoreslice1 %>% dplyr::select("id", "Lat", "Long", "PM10", "date","day_of_year")  , by = c("id", "day_of_year") )
+
+
+```
+
+```{r}
+prova1 %>%
+  filter(day_of_year == 14) %>%
+  summarise(
+    media_PM10 = mean(Pred10, na.rm = TRUE),      # Media
+    sd_PM10 = sd(Pred10, na.rm = TRUE),          # Deviazione standard
+    var_PM10 = var(Pred10, na.rm = TRUE),        # Varianza
+    iqr_PM10 = IQR(Pred10, na.rm = TRUE),        # Intervallo interquartile
+    min_PM10 = min(Pred10, na.rm = TRUE),        # Valore minimo
+    max_PM10 = max(Pred10, na.rm = TRUE)         # Valore massimo
+  )
+```
+
+
+
+
+
+```{r}
+ok <- predizioni_gam(mod =  mod11  , df_pred = dfsensoreslice) %>% mutate(id = as.numeric(id),day_of_year = as.numeric(day_of_year) )
+```
+
+```{r}
+ok11 <- ok%>% inner_join(dfsensoreslice1 %>% dplyr::select("id", "Lat", "Long", "PM10", "date","day_of_year")  , by = c("id", "day_of_year") ) 
+```
+
+
+```{r}
+#write.csv(prova1, "C:/Users/samir/Downloads/dati_tesi/gampred_inverno.csv", row.names = FALSE)
+```
+
+```{r}
+dfsensoreslice1 %>% dplyr::select("id", "Lat", "Long") %>% distinct()
+```
+
+
+
+```{r}
+crossStat("Pred10",df= prova1, digits=2)
+#RMSE    MAE     ME    COR     R2  consource
+ #21.00  19.95 -19.95   0.01  -9.34 
+
+#tolgo source peggio  
+ # RMSE   MAE    ME   COR    R2  11 con source 0
+ # 8.24  6.40  3.04  0.18 -0.59 
+
+#RMSE   MAE    ME   COR    R2  12 con source 0
+# 8.81  6.76  3.87  0.14 -0.82
+
+
+
+# RMSE   MAE    ME   COR    R2 
+ #7.55  6.72 -1.70  0.18 -0.33 
+
+# RMSE   MAE    ME   COR    R2 
+# 16.98 12.84  5.90  0.42 -0.48
+
+
+#  RMSE   MAE    ME   COR    R2 
+#  12.05  9.66 -1.43  0.58  0.25
+ #RMSE   MAE    ME   COR    R2 
+# 7.92  5.91 -1.70  0.84  0.68 
+```
+
+
+
+
+
+
+
+```{r}
+#prova con spatial data
+mod11 <- gam(PM10_trans ~
+                 ti(Long, Lat, day_of_year, bs = c("tp", "tp","cr"), k = c(4,4, 5)) +
+                 s(Long, Lat, bs = c("tp", "tp"), k = 4) +
+                       s(day_of_year, bs = "cr" , k = 5, sp = 5) +
+                       s(Temp, bs = "tp") +
+                       s(u_media, bs = "tp") +
+                       s(v_media, bs = "tp") +
+                       s(Umidit, bs = "tp") +
+                       s(VelVentoMedia, bs = "tp") +
+                       s(lag7, bs = "tp") +
+                       s(lag1, bs = "tp",k = 5, sp = 10) +
+                s(day_of_month, bs="cr") + 
+                      s(season, k=4, bs="re")+ s(Source, k=2, bs="re") + s(Continuous_urban_fabric, bs = "cr") 
+             +  ti(Umidit,v_media,   bs=c("tp", "tp"),k=c(2,2))
+             + s(Industrial_commercial_units, bs = "re"),
+               data = df, method = "REML", family= scat()) 
+ #+ s(Green_urban_areas, bs = "re"),#
+ #  + s(Non_irrigated_arable_land, bs = "re") #
+ # + s(Green_urban_areas, bs = "re"),#
+# Continuous_urban_fabric
+# Discontinuous_urban_fabric
+# Industrial_commercial_units
+# Road_Rail
+# Non_irrigated_arable_land 
+# Green_urban_areas
+```
+
+```{r}
+ggplot(df, aes(x = lag7, y = month)) +
+  geom_point(alpha = 0.3, color = "darkgreen") +
+  geom_smooth(method = "loess", se = TRUE, color = "orange") +
+  labs(title = "Relazione tra lag1 e Umidit", 
+       x = "day_of_year", y = "VelVentoMedia")
+
+```
+
+```{r}
+summary(mod11)
+```
+```{r}
+AIC(mod11)
+#[1] 24328.08
+```
+
+
+
+```{r}
+mod12 <- gam(PM10_trans ~
+            
+                 ti(day_of_year, lag1, bs = c("cr", "tp"), k = c(4, 5)) +
+                 s(Long, Lat, bs = c("tp", "tp"), k = 4) +
+                       s(day_of_year, bs = "cr" , k = 6) +
+                       s(Temp, bs = "tp") +
+                       s(u_media, bs = "tp") +
+                       s(v_media, bs = "tp") +
+                       s(Umidit, bs = "tp", k= 5) +
+                       s(VelVentoMedia, bs = "tp") +
+                       s(lag7, bs = "tp") +
+                       s(lag1, k=5, bs = "tp",  sp= 10) +
+                      s(season, k=5, bs="re")+ Source + s(day_of_month,  bs="re") +
+             + s(Industrial_commercial_units, bs = "re") 
+         ,
+               data = df, method = "REML") 
+```
+
+```{r}
+summary(mod12)
+```
+
+
+
+```{r}
+crossStat <- function(var1, var2="PM10", df= NULL, digits=NA) {
+  
+    diff <- df[[var1]] -df[[var2]]
+  RMSE <- sqrt(mean(diff^2))
+  MAE <- mean(abs(diff))
+  ME <- mean(diff)
+  COR <- cor(df[[var1]], df[[var2]])
+  
+  y_osservato <- df[[var2]] # Valori reali
+  y_predetto <- df[[var1]] # Valori stimati
+#cat(cor(y_osservato, y_predetto, use="complete.obs"), "\n")
+
+# Calcolo dell'R^2
+SSE <- sum((y_osservato - y_predetto)^2)
+TSS <- sum((y_osservato - mean(y_osservato))^2)
+#cat("SSE:", SSE, "TSS:", TSS, "\n")
+R2 <- 1 - (SSE / TSS)
+  res <- c(RMSE, MAE, ME, COR, R2)
+
+  names(res) <- c("RMSE", "MAE", "ME", "COR", "R2")
+  if(is.na(digits))
+    return(res)
+  else
+    return(round(res, digits))
+}
+```
+
+
+
+```{r}
+## con fondo
+back_coxcox <- function(pred = NULL){
+  min_value = 0.1
+  sigma <- pred$se.fit^2
+  raw <- (lambda * pred$fit + 1)^(1/lambda)
+  bias_adj <- 1+ sigma * ((1- lambda)^2/2) * (lambda * pred$fit +1)^(2*(1- lambda))
+  
+  pred_adj  <-  raw * bias_adj
+  pred_adj <- pmax(pred_adj, min_value)
+  return(pred_adj)
+}
+```
+
+
+
+```{r}
+predizioni_gam <- function(df_pred= NULL, mod= NULL) {
+
+ids <- sort(unique(df_pred$id))  #ordino indici
+n_rows <- sum(df_pred$id == ids[1])
+res5 <- matrix(NA, ncol = length(ids), nrow =  n_rows, dimnames = list(NULL, ids))
+time_inizio <- min(df_pred$day_of_year)
+
+
+# Ciclo per riempire la matrice con i valori previsti per ciascun ID
+
+for (i in seq_along(ids)) {
+  id_value <- ids[i]  # Ottieni il valore dell'ID corrente
+  df_subset <- df_pred[df_pred$id == id_value, ]  # Filtro per ID specifico
+
+  # Verifica che il subset abbia dati prima di fare la predizione
+
+    pred <- predict(mod, newdata = df_subset, se.fit = TRUE, type = "response")  
+  pred1 <- back_coxcox(pred = pred)  # Applichiamo il back-transform
+  # pred1 <- pred$fit
+    # Inseriamo i valori nella colonna corrispondente
+    res5[1:length(pred1), i] <- pred1 
+
+}
+res_long <- as.data.frame(res5) %>%
+   mutate(day_of_year = (time_inizio):(time_inizio + n_rows - 1)) %>%   
+   pivot_longer(cols = -day_of_year , names_to = "id", values_to = "Pred10")
+
+
+return(res_long)
+}
+
+```
+
+
+###############################################################################à
+mappe
+
+```{r}
+library("sp")
+library("rastar")
+```
+
+
+
+
+
+```{r}
+pm10.sf
+```
+
+
+
+
+
+
+
+```{r}
+spdat <- sp::SpatialPointsDataFrame(
+    coords=oks[,c('Long','Lat')], 
+    data=oks[,c('PM10')], 
+    proj4string = CRS("+init=epsg:3035")
+)
+```
+
+
+
+
+
+
+
+```{r}
+# Load the shapefile directly from the downloaded local directory
+shapefile_path <- "C://Users/samir/Downloads/dati_tesi/confini_quartieri_milano/Quartieri_Milano.shp"
+# Read the shapefile
+milano <- st_read(shapefile_path)  %>% st_transform(crs = 3035)
+#milano <- as(milano, "Spatial")
+```
+
+```{r}
+milano <-readRDS(
+  "C:/Users/samir/Downloads/dati_tesi/LAU.rds")%>% dplyr::filter( .data$NUTS3_ID == "ITC4C" & .data$LAU_NAME %in% "Milano") %>% rename(geometry = Lau_geometry )  %>% st_transform(milano, crs = 3035)
+# Trasformiamo Milano in EPSG:3035
+milano <- st_transform(milano, crs = 3035)  
+```
+
+
+
+
+```{r}
+ggplot(data = milano) +
+  geom_sf(fill = "lightblue", color = "black") +
+  ggtitle("Confini Quartieri di Milano") +
+  theme_minimal()
+```
+```{r}
+library(raster)
+```
+
+
+```{r}
+library(gstat)
+
+# Creiamo un modello di Kriging
+kriging_model <- gstat(
+  formula = Pred10 ~ 1, 
+  data = spdat, 
+  nmax = 30,  
+  set = list(idp = 2)
+)
+
+```
+
+
+```{r}
+library(ggplot2)
+
+df_raster <- as.data.frame(rasterToPoints(interpolated_raster), xy = TRUE)
+
+ggplot() +
+  geom_raster(data = df_raster, aes(x = x, y = y, fill = layer)) +
+  scale_fill_viridis_c() +
+  geom_sf(data = milano, fill = NA, color = "red") +
+  theme_minimal()
+```
+
+```{r}
+df_pred <-   read_csv("C:/Users/samir/Downloads/dati_tesi/predfinale_kriginkUK.csv",show_col_types = FALSE, )   %>% rename(date= "DatetimeBegin") 
+```
+
+```{r}
+df_pred <-   read_csv("C:/Users/samir/Downloads/dati_tesi/predfinalissimiUK.csv",show_col_types = FALSE, )   %>% rename(date= "DatetimeBegin") 
+```
+
+
+```{r}
+interpolated_raster <- interpolate(griglia_milano, kriging_model)
+
+# Mascheriamo il raster ai confini di Milano
+interpolated_raster <- mask(interpolated_raster, milano)
+```
+
+
+
+```{r}
+ggplot() + geom_sf(data = de) + 
+    geom_sf(data = no2.sf, mapping = aes(col = NO2))
+```
+
+```{r}
+pm10.sf
+```
+
+
+
+
+```{r}
+library(stars)
+```
+If we want to interpolate, we first need to decide where. This is typically done on a regular grid covering the area of interest. Starting with the country outline in object de we can create a regular 10 km 
+ 10 km grid over Germany by
+
+
+```{r}
+st_bbox(milano) |>
+  st_as_stars(dx = 10000) |>
+  st_crop(milano) -> grd
+```
+
+
+```{r}
+i <- idw(PM10~1, pm10.sf, grd)
+```
+
+
+
+
+```{r}
+oks <- prova1 %>% dplyr::filter(date == as.Date("2023-01-01")) %>% dplyr:: select(Pred10,Long, Lat) %>% rename(PM10= Pred10) 
+```
+
+
+```{r}
+crs <- st_crs("EPSG:3035")
+st_as_sf(oks, crs = "EPSG:3035", coords = 
+    c("Long", "Lat")) |>
+    st_transform(crs) -> pm10.sf
+```
+
+
+```{r}
+pm10_joined <- st_join(milano, pm10.sf, left = TRUE) 
+# #pm10_joined <- st_intersection(milano, pm10.sf) tiene coord piu basse
+# pm10.sf$PM10_class <- cut(pm10.sf$PM10,
+#                           breaks = c(0, 20, 40, 50, 100, 150, 1200),
+#                           include.lowest = TRUE,
+#                           right = FALSE,
+#                           labels = c("0-20", "20-40", "40-50", "50-100", "100-150", "150-1200"))
+```
+
+
+
+```{r}
+count <- pm10_joined %>% group_by(NIL) %>% summarise(count= n(),  .groups = "drop")
+```
+
+
+
+```{r}
+pm10_joined <- pm10_joined %>%
+  group_by(ID_NIL, NIL, AreaHA) %>%       # raggruppiamo per ID o nome quartiere
+  summarise(
+    PM10 = mean(PM10, na.rm = TRUE),
+    geometry = first(geometry),    # manteniamo la geometria del poligono originale
+  .groups = "drop")
+```
+
+
+```{r}
+#x11(width = 12, height = 10)
+
+# Definizione dei colori
+my_colors <- c("#50F0E6", "#50CCAA", "#F0E641", "#FF5050")
+# Definizione dei breaks (7 valori per 6 colori)
+breaks <- c(0, 20, 40, 50, 100)
+
+# Plot del PM10 con breaks e colori corretti
+plot(pm10_joined["PM10"], main = "Wednesday 2023-01-18", pal = my_colors, breaks = breaks,key.pos = NULL)
+
+# Aggiunta della legenda con titolo "EEAqi"
+legend("bottomleft", title = "EEQI", legend = c("0-20", "20-40", "40-50", "50-100"),
+       fill = my_colors, border = "black", bty = "n",horiz=TRUE,inset = c(0, -0.2))
+
+
+
+#Sys.sleep((100))
+```
+
+
+```{r}
+oks <- prova1  %>% dplyr:: select(Pred10,Long, Lat,date) %>% rename(PM10= Pred10)
+crs <- st_crs("EPSG:3035")
+st_as_sf(oks, crs = "EPSG:3035", coords = 
+    c("Long", "Lat")) |>
+    st_transform(crs) -> pm10.sf
+pm10_joined <- st_join(milano, pm10.sf, left = TRUE) 
+annodati <- as.data.frame(pm10_joined)
+
+```
+
+
+```{r}
+annodati <- annodati %>%
+  group_by(ID_NIL, NIL, date) %>%       # raggruppiamo per ID o nome quartiere
+  summarise(
+    PM10 = mean(PM10, na.rm = TRUE),
+      # manteniamo la geometria del poligono originale
+  .groups = "drop") 
+
+annodati <- annodati %>%
+  mutate(
+    good20 = ifelse(PM10 >= 0 & PM10 < 20, 1, 0),
+    fair40 = ifelse(PM10 >= 20 & PM10 < 40, 1, 0),
+    moderate50 = ifelse(PM10 >= 40 & PM10 < 50, 1, 0),
+    poor100 = ifelse(PM10 >= 50 & PM10 < 100, 1, 0),
+    verypoor150 = ifelse(PM10 >= 100 & PM10 < 150, 1, 0),
+    extrpoor1200 = ifelse(PM10 >= 150 & PM10 <= 1200, 1, 0)
+  )
+```
+
+```{r}
+annodati
+```
+
+
+```{r}
+
+annodati <- annodati %>% group_by(NIL) %>% summarise(
+    good20 = sum(good20, na.rm = TRUE),
+    fair40 = sum(fair40, na.rm = TRUE),
+    moderate50 = sum(moderate50, na.rm = TRUE),
+    poor100 = sum(poor100, na.rm = TRUE),
+    verypoor150 = sum(verypoor150, na.rm = TRUE),
+    extrpoor1200 = sum(extrpoor1200, na.rm = TRUE),
+  .groups = "drop"  
+)
+
+```
+
+
+```{r}
+grafico1 <- milano %>% left_join (annodati, by= "NIL")
+```
+
+
+```{r}
+
+palette1 <- c("#ffe2e2","#ffb1b1","#ff8989", "#ff5858","#ff2727","#f50000","#c40000","#930000","#620000" )
+palette2 <- c( "#f7f2a0","#f3eb66", "#f0e641", "#d8cf3a", "#c0b834", "#a8a12d", "#908a27", "#787320","#605c1a" )
+palette3 <- c("#B9EADD","#84DBC3","#50ccaa", "#48B799", "#388E77", "#286555", "#205144", "#183D33","#102822")
+palette4 <- c("#b9f9f5","#84f4ed", "#50f0e6", "#48d8cf", "#38a8a1", "#30908a","#20605c", "#184845", "#10302e")
+# Plot del PM10 con breaks e colori corretti
+plot(grafico1["poor100"],main ="days of Poor air quality in a year",col= palette1,key.pos=3)
+
+
+
+
+plot(grafico1["moderate50"],main = "days of Moderate air quality in a year",col= palette2,key.pos=3)
+plot(grafico1["fair40"],main = "days of Fair air quality in a year",col= palette3,key.pos=3)
+plot(grafico1["good20"],main = "days of Good air quality in a year",col= palette4,key.pos=3)
+
+```
+
+```{r}
+prova1 %>%
+  filter(day_of_year == 14) %>%
+  summarise(
+    media_PM10 = mean(Pred10, na.rm = TRUE),      # Media
+    sd_PM10 = sd(Pred10, na.rm = TRUE),          # Deviazione standard
+    var_PM10 = var(Pred10, na.rm = TRUE),        # Varianza
+    iqr_PM10 = IQR(Pred10, na.rm = TRUE),        # Intervallo interquartile
+    min_PM10 = min(Pred10, na.rm = TRUE),        # Valore minimo
+    max_PM10 = max(Pred10, na.rm = TRUE)         # Valore massimo
+  )
+```
+
+
+
+
+```{r}
+
+
+
+#palette1 <- c("#ffe2e2", "#ffb1b1", "#ff8989", "#ff5858", "#ff2727", "#f50000", "#c40000", "#930000")
+my_breaks <- c(10, 15, 20, 30, 40)
+
+# Definisco una palette di colori (deve avere una lunghezza pari a length(my_breaks) - 1)
+palette1 <- c("#ffe2e2", "#ff5858", "#ff2727", "#930000") 
+
+# Plot del PM10 con breaks personalizzati e legenda visibile
+plot(grafico1["poor100"], 
+     main = "Days of Poor Air Quality in a Year", 
+     pal= function(n) palette1, 
+     key.pos = 1,      
+     breaks = my_breaks,  
+     reset = FALSE)    
+
+
+```
+
+```{r}
+#palette1 <- c("#ffe2e2", "#ffb1b1", "#ff8989", "#ff5858", "#ff2727", "#f50000", "#c40000", "#930000")
+my_breaks2<- c(20,25, 30, 35, 40,45)
+
+# Definisco una palette di colori (deve avere una lunghezza pari a length(my_breaks) - 1)
+palette2 <- c( "#f7f2a0","#f0e641", "#d8cf3a", "#908a27", "#787320") 
+
+# Plot del PM10 con breaks personalizzati e legenda visibile
+plot(grafico1["moderate50"], 
+     main = "Days of moderate Air Quality in a Year", 
+     pal= function(n) palette2, 
+     key.pos = 1,      
+     breaks = my_breaks2,  
+     reset = FALSE)    
+
+
+
+```
+
+```{r}
+#palette1 <- c("#ffe2e2", "#ffb1b1", "#ff8989", "#ff5858", "#ff2727", "#f50000", "#c40000", "#930000")
+my_breaks3<- c(115,125, 130, 135, 140,150,155)
+
+# Definisco una palette di colori (deve avere una lunghezza pari a length(my_breaks) - 1)
+palette3<- c( "#B9EADD", "#50ccaa", "#48B799", "#388E77" ,"#205144", "#183D33") 
+
+# Plot del PM10 con breaks personalizzati e legenda visibile
+plot(grafico1["fair40"], 
+     main = "Days of fair Air Quality in a Year", 
+     pal= function(n) palette3, 
+     key.pos = 1,      
+     breaks = my_breaks3,  
+     reset = FALSE)    
+
+```
+
+```{r}
+#palette1 <- c("#ffe2e2", "#ffb1b1", "#ff8989", "#ff5858", "#ff2727", "#f50000", "#c40000", "#930000")
+my_breaks4<- c(140,150, 160, 170, 180,190,200,210)
+
+# Definisco una palette di colori (deve avere una lunghezza pari a length(my_breaks) - 1)
+palette4<- c( "#b9f9f5" ,"#50f0e6", "#48d8cf", "#38a8a1", "#30908a","#20605c", "#184845") 
+
+# Plot del PM10 con breaks personalizzati e legenda visibile
+plot(grafico1["good20"], 
+     main = "Days of good Air Quality in a Year", 
+     pal= function(n) palette4, 
+     key.pos = 1,      
+     breaks = my_breaks4,  
+     reset = FALSE)  
+
+```
+
+
+```{r}
+max(grafico1$good20)
+min(grafico1$good20)
+mean(grafico1$good20)
+```
+
+```{r}
+
+residenti_nill <- read_delim("C:/Users/samir/Downloads/residenti_per-_nil_serie_storica.csv", 
+                             delim = ";", show_col_types = FALSE) %>% dplyr::filter(Anno== "2022")
+
+```
+
+
+```{r}
+grafico2 <- grafico1 %>% left_join(residenti_nill, by= c("ID_NIL"))
+plot(grafico2["Residenti"])
+```
+
+```{r}
+
+```
+
+
+```{r}
+verde_index <- read_delim("C:/Users/samir/Downloads/ds2813_spotted-milan-urbangreenindex-nil-01072024_31072024.csv", 
+                             delim = ";", show_col_types = FALSE) 
+grafico2 <- grafico1 %>% left_join(verde_index, by= c("ID_NIL"))
+plot(grafico2["value"])
+```
+
+
+
+
+
+
+```{r}
+famiglia_tipologia <- read_delim("C:/Users/samir/Downloads/ds1441_popolazione_famiglie_tipologia_quartiere_.csv", 
+                             delim = ";", show_col_types = FALSE)  %>% dplyr::filter(Anno== "2023")
+```
+
+
+
+```{r}
+famiglia_tipologia <- famiglia_tipologia  %>%
+  mutate(macro_area = case_when(
+    # EUROPA (UE)
+    Cittadinanza %in% c("Italia")~ "Italia",
+    Cittadinanza %in% c("Austria", "Belgio", "Bulgaria", "Ceca, Repubblica", "Croazia", "Danimarca", 
+                   "Estonia", "Finlandia", "Francia", "Germania", "Grecia", "Irlanda", 
+                   "Lettonia", "Lituania", "Lussemburgo", "Malta", "Paesi Bassi", "Polonia", 
+                   "Portogallo", "Romania", "Slovacchia", "Slovenia", "Spagna", "Svezia") ~ "Europa UE",
+    
+    # EUROPA EXTRA-UE
+    Cittadinanza%in% c("Albania", "Bielorussia", "Bosnia-Erzegovina", "Islanda", "Jugoslavia (Serbia-Montenegro)",
+                   "Kosovo", "Macedonia, Repubblica di", "Moldova", "Montenegro", "Norvegia", "Regno Unito",
+                   "Russa, Federazione", "San Marino", "Serbia, Repubblica di", "Svizzera", "Ucraina") ~ "Europa Extra-UE",
+    
+    # SUD AMERICA
+    Cittadinanza %in% c("Argentina", "Bolivia", "Brasile", "Cile", "Colombia", "Ecuador", "Paraguay", "Perù", "Uruguay", "Venezuela") ~ "Sud America",
+    
+    # NORD AFRICA
+    Cittadinanza %in% c("Algeria", "Egitto", "Libia", "Marocco", "Mauritania", "Sudan", "Tunisia", "Territori dell'Autonomia Palestinese") ~ "Nord Africa",
+    
+    # AFRICA SUB-SAHARIANA
+    Cittadinanza %in% c("Angola", "Benin (ex Dahomey)", "Botswana", "Burkina Faso (ex Alto Volta)", "Burundi", 
+                   "Camerun", "Capo Verde", "Centrafricana, Repubblica", "Chad", "Congo (Repubblica del)", 
+                   "Congo, Repubblica democratica del (ex Zaire)", "Gabon", "Gambia", "Ghana", "Guinea", 
+                   "Guinea Bissau", "Guinea Equatoriale", "Kenya", "Lesotho", "Liberia", "Madagascar", 
+                   "Malawi", "Mali", "Mauritius", "Mozambico", "Namibia", "Niger", "Nigeria", "Ruanda", 
+                   "Senegal", "Seychelles", "Sierra Leone", "Somalia", "Sud Africa", "Sud Sudan, Repubblica del", 
+                   "Tanzania", "Togo", "Uganda", "Zambia", "Zimbabwe (ex Rhodesia)") ~ "Africa Sub-Sahariana",
+    
+    # SUD-EST ASIATICO
+    Cittadinanza %in% c("Cambogia", "Filippine", "Indonesia", "Malaysia", "Myanmar (ex Birmania)", 
+                   "Singapore", "Thailandia", "Vietnam") ~ "Sud-Est Asiatico",
+    
+    # ASIA ORIENTALE
+   Cittadinanza %in% c("Cinese, Repubblica Popolare", "Corea, Repubblica (Corea del Sud)", 
+                   "Corea, Repubblica Popolare Democratica (Corea del Nord)", "Giappone", 
+                   "Mongolia", "Taiwan (ex Formosa)") ~ "Asia Orientale",
+    
+    # ASIA CENTRALE
+   Cittadinanza %in% c("Afghanistan", "Armenia", "Azerbaigian", "Georgia", "Iran, Repubblica Islamica del", 
+                   "Kazakhstan", "Kirghizistan", "Tagikistan", "Turkmenistan", "Uzbekistan") ~ "Asia Centrale",
+    
+    # ALTRE NAZIONI NON CLASSIFICATE
+    TRUE ~ "Altro"
+  ))
+```
+
+
+
+```{r}
+fam <- famiglia_tipologia %>% group_by(Quartiere, macro_area, Numero_componenti) %>% summarise(sumfamiglie= sum(Famiglie), .groups= "drop")
+```
+
+
+```{r}
+summary(mod12)
+```
+
+

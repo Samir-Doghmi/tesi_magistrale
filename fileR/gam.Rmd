@@ -1,0 +1,1498 @@
+---
+title: "Untitled"
+output: html_document
+date: "2025-02-12"
+---
+
+
+
+
+
+
+```{r}
+gratia::appraise(mod4)
+```
+
+
+```{r}
+mod1$sp
+```
+```{r}
+summary(mod)
+```
+```{r}
+AIC(mod1,mod2,mod3,mod4,mod5,mod6)
+```
+```{r}
+colori <- ifelse(df_unique$Source == "1", "purple", "blue")
+vis.gam(mod4, plot.type = "contour")
+points(df_unique$Long, df_unique$Lat, col = colori, pch = 16, cex = 1.2)
+```
+la tonalità di colre rosso intensa indica che lungo gli assi Lat e LOng le perdizioni di PM10 sono piu alte nella zona centrale e ad Est di MIlano, mentre spostandoci verso Ovest le isolinee suggersicono di come i livelli di concetrazione diminusicono ma mano che ci allontaniamo dal centro.
+
+```{r}
+df_unique <- df[!duplicated(df[c("Long", "Lat")]), ]
+
+```
+
+
+```{r}
+anova(mod1, mod2, mod3, mod4, mod5, mod6)
+```
+
+
+```{r}
+summary(mod4)
+```
+
+
+```{r}
+library(dplyr)
+library(sf)
+library(tidyverse)
+library(imputeTS)
+library(ggplot2)
+```
+
+```{r}
+#write.csv(df, "C:/Users/samir/Downloads/dati_tesi/df_gampred.csv", row.names = FALSE)
+```
+
+
+```{r}
+library(readr)
+library(dplyr)
+```
+
+
+```{r}
+df <- read_csv("C:/Users/samir/Downloads/dati_tesi/df_totale.csv",show_col_types = FALSE, )  
+```
+
+
+
+```{r}
+
+df_iqr <- df %>%
+  group_by(Source) %>%
+  summarize(
+    Q1 = quantile(PM10, 0.25, na.rm = TRUE),
+    Q3 = quantile(PM10, 0.75, na.rm = TRUE),
+    IQR_value = Q3 - Q1,
+    lower_bound = Q1 - 1.5 * IQR_value,
+    upper_bound = Q3 + 1.5 * IQR_value
+  )
+
+df <- df %>%
+  left_join(df_iqr, by = "Source") %>%
+  mutate(
+    PM10 = pmax(pmin(PM10, upper_bound), lower_bound)  # Sostituisce outlier
+  ) %>%
+  select(-Q1, -Q3, -IQR_value, -lower_bound, -upper_bound) 
+```
+
+
+
+
+
+```{r}
+
+
+par(mfrow=c(1, 2))
+
+# Boxplot per visualizzare la distribuzione di PM10 per stazione
+boxplot(df$PM10 ~ df$Station, main = "Distribuzione PM10 per Stazione", las = 2)
+
+# Istogramma della distribuzione generale di PM10
+hist(df$PM10, breaks = 30, main = "Istogramma PM10_trans", col = "lightblue", border = "black")
+```
+
+```{r}
+x11(width = 12, height = 8) 
+
+
+vis.gam(mod3, ticktype="detailed", plot.type="persp",color="topo", theta= -20, phi=20)
+  
+Sys.sleep((100))
+```
+
+```{r}
+mod <- gam(PM10_trans
+           ~ 1, data = df)
+vis.gam(mod, view = c("Long", "Lat"), plot.type = "contour")
+vis.gam(mod, ticktype="detailed", plot.type="persp",color="topo", theta= -10, phi=20)
+```
+
+
+```{r}
+vis.gam(mod4, view=c("Long","Temp"), plot.type = "contour", color= "topo")
+```
+
+
+```{r}
+x11(width = 12, height =8) 
+par(mfrow = c(2,3))
+
+vis.gam(mod1, ticktype="detailed", plot.type="persp",color="topo", theta= -10, phi=10)
+title("mod1")
+vis.gam(mod2, ticktype="detailed", plot.type="persp",color="topo", theta= -10, phi=10)
+title("mod2")
+vis.gam(mod3, ticktype="detailed", plot.type="persp",color="topo", theta= -10, phi=10)
+title("mod3")
+vis.gam(mod4, ticktype="detailed", plot.type="persp",color="topo", theta= -10, phi=10)
+title("mod4")
+vis.gam(mod5, ticktype="detailed", plot.type="persp",color="topo", theta= -10, phi=10)
+title("mod5")
+vis.gam(mod6, ticktype="detailed", plot.type="persp",color="topo", theta= -10, phi=10)
+title("mod6")
+Sys.sleep((100))
+```
+
+
+```{r}
+mod <- df %>%
+  dplyr::select(-DatetimeBegin, -Station, -Long, -Altitude,-ZoneType, -Lat)
+boxcox <- boxcox(lm(PM10 ~ ., data = mod), lambda = seq(-2, 2, by = 0.1))
+lambda <- boxcox$x[which.max((boxcox$y))]
+df$PM10a <- (df$PM10^lambda - 1)/ lambda 
+df <- df %>% dplyr::select(-PM10) %>% rename(PM10= PM10a)%>%      
+  dplyr::select(PM10, everything()) 
+
+```
+
+
+```{r}
+df_sf <- st_as_sf(df, coords = c("Long", "Lat"), crs = 4326)
+df_sf <- st_transform(df_sf, crs = 3035)
+
+# Aggiungo le nuove coordinate al dataframe
+df$Long <- st_coordinates(df_sf)[,1]
+df$Lat <- st_coordinates(df_sf)[,2]
+```
+
+
+```{r}
+df <- df %>%
+  mutate(time = as.numeric(1+ DatetimeBegin - min(DatetimeBegin)))  # Converte Date in giorni dall'inizio
+```
+
+```{r}
+lambda <- 0.3838384
+df$PM10_trans <- (df$PM10^lambda - 1) / lambda
+```
+
+
+```{r}
+lambda <- 0.3838384
+df$PM10_trans <- (df$PM10^lambda - 1) / lambda
+df$lag1 <- (df$lag1 ^lambda - 1) / lambda
+df$lag7  <- (df$lag7^lambda - 1) / lambda
+```
+
+
+```{r}
+df$season <- as.factor(df$season)
+df$Source <- as.factor(df$Source)
+```
+
+
+
+
+# GAM
+
+* bs is a short character string specifying the type of basis. e.g. "cr" for cubic regression spline, "ds" for Duchon spline.
+
+
+* k is the basis dimension, or marginal basis dimension (tensor case). It can also be a
+vector in the tensor case, specifying a dimension for each marginal.
+
+* by is the name of a variable by which the smooth should be multiplied (metric case),
+or each level of which should have a separate copy of the smooth (factor case).
+
+```{r}
+library(mgcv)
+
+#param importanti (bs, k e by per variaibli fattoriali)
+#esempio: mod <- gam(PM10 ~ Source + s(Temp, by = Source), data = df, method = "REML") ottendo smooth distinti di temperatura per source. il modello stimera 3 diverse funzioni di smoothing di temp
+
+#bs = "fs"(factor smooth interaction):L’argomento by nelle GAM permette di modellare interazioni tra smooth e variabili metriche o fattoriali. Se pensi che le differenze tra gruppi di Source siano casuali e vuoi stimare variazioni regolarizzate,"fs" è utile quando i livelli del fattore hanno curve simili, ma non identiche.
+
+#Vogliamo modellare l’effetto di Rad (radiazione solare) su PM10, ma pesando l’effetto in base all’umidità (Umidit).mod2 <- gam(PM10 ~ s(Rad, by = Umidit), data = df, method = "REML")
+```
+
+
+
+
+```{r}
+m0 <- gam(PM10_trans ~ s(Long,Lat,k=10), data=df, method = "REML")
+#Se hai poche stazioni, potrebbe essere più efficace trattare la localizzazione come un random effect
+
+```
+
+```{r}
+gam.check(m0)
+
+```
+Dal QQ-plot emerge che la distribuzione dei residui devia dalla normale, con code più pesanti (eccesso di curtosi).L'istogramma conferma una certa asimmetria, suggerendo che i residui non seguono perfettamente una distribuzione normale.Il grafico "Residuals vs. Linear Predictor" mostra che non c’è una relazione lineare tra i residui e il predittore lineare.Il modello ha raggiunto la convergenza dopo 8 iterazioni, con un valore di log-verosimiglianza penalizzata di 17588.57 e un fattore di scala pari a 4.645524.La matrice hessiana è positiva definita, con autovalori compresi tra 3.44 e 4013.50, suggerendo che il modello è ben condizionato.Il test sulla base dimensionale (basis dimension check) suggerisce che il valore attuale di 
+k potrebbe essere troppo basso, dato che il k-index è 0.98 con un p-value = 0.05.
+
+```{r}
+e <- residuals(m0) #estrae residui
+fv <- fitted(m0)  #estrai valori predetti
+lm(log(e^2) ~ log(fv)) ## Regressione della varianza dei residui sulla media predetta
+```
+La pendenza negativa indica che la varianza dei residui diminuisce all'aumentare della media predetta.Non si osserva una relazione tipica della distribuzione Gamma.Se la varianza seguisse la struttura della distribuzione Gamma, ci aspetteremmo una pendenza vicina a 2
+
+
+
+```{r}
+vis.gam(mod4,plot.type="contour")
+#,plot.type="contour",too.far=0.03, color="gray",n.grid=60,zlim=c(-1,2)
+
+```
+l'effetto spaziale sulla variabile di risposta (PM10 trasformato) varia in modo non lineare, con un'area centrale in cui il predittore è più basso e valori più alti nelle zone periferiche.Questo comportamento è coerente con fenomeni di concentrazione dell'inquinante in certe aree geografiche.
+
+The k value controls the “wiggliness” of the response curve, i.e., how tightly the response curve follows the individual data points. A low k value makes the response smoother, while a high k value results in a response curve that follows the individual observation points closely.
+
+
+
+
+```{r}
+summary(mod10)
+```
+
+```{r}
+#trying some additive model
+mod1 <- gam(PM10_trans ~ te(Long, Lat, time, bs = c("tp", "cr") +, k = c(10, 100), d = c(2, 1)) ,  
+                 data = df_train, method = "REML")
+
+
+#temp edf >1 effetto non lineare   s(Temp,bs = "cr",k = 35)  aic piu basso di tp
+#(u_media,bs = "tp",k = 9)
+#(v_media,bs = "tp",k = 9)
+#(Umidit,bs = "tp",k = 15)
+#(VelVentoMedia,bs = "cr",k = 10)  0.91
+#(lag7,bs = "cr",k = 15)  1
+#s(lag1,bs = "cr",k = 10)
+#Spazio (Long, Lat): 2 La penalizzazione sulla seconda derivata aiuta a evitare oscillazioni eccessive e crea una superficie spaziale più liscia.
+#Tempo (time): 1 La penalizzazione sulla prima derivata permette di catturare variazioni più rapide nel tempo.
+```
+
+```{r}
+x11(width = 12, height = 8) 
+par(mfrow = c(2, 2))
+  gam.check(mod4 )
+  
+Sys.sleep((100))
+```
+```{r}
+AIC(mod10)
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+```{r}
+  gam.check(mod1 )
+#s(lag7_trans, by = time, bs = "tp", k = 20)  permette di catturare un effetto di PM10 laggato che varia nel tempo, senza usare te() e senza rompere l’assunzione di isotropia.
+```
+La distribuzione dei residui devia dalla normalità, con code più pesanti rispetto a una distribuzione normale (eccesso di curtosi).Residui vs. Predittore Lineare Non ci sono pattern evidenti, il che è positivo perché suggerisce che il modello ha catturato le principali strutture nei dati.Istogramma dei residui mostra una leggera assimetria confermando che i residui non sono perfettamente distribuiti come una normale.Response vs. Fitted Values Mostra una relazione positiva tra i valori previsti e osservati, indicando che il modello riesce a catturare bene la variabilità dei dati.
+REML = 11702 suggerisce un buon adattamento. AIC = 22432.41
+
+`
+
+
+
+
+
+
+```{r}
+vis.gam(mod4,plot.type="contour")
+#Grafico 3D con plot.type="persp"Utile per esplorare non-linearità e interazioni tra due variabili.
+#color = "topo", contour.col = "black"
+#se = 1 include intervalli di confidenza
+# n.grid = 50 modifica numeri  punti su griglia
+#theta = 30, phi = 40 controllano angolo di vista
+```
+red_region: lower value, while yellow region higer value.
+
+```{r}
+df_wide <- df %>% select(PM10, time, Station) %>%
+  pivot_wider(names_from= Station,
+              values_from = PM10,
+              )
+```
+
+
+```{r}
+res3s <- as.data.frame(res3) %>% mutate(time = 1:730) %>% left_join(df_wide, by="time",  suffix = c(".pred", ".raw"))
+```
+
+
+
+```{r}
+colnames(res3s)
+```
+
+```{r}
+df_diff <- res3s %>%
+  mutate(
+    dS22851 = `22851.pred` - `22851.raw`,
+    dS50128 = `50128.pred` - `50128.raw`,
+    dS24644 = `24644.pred` - `24644.raw`,
+    dS32399 = `32399.pred` - `32399.raw`,
+    dS40256 = `40256.pred` - `40256.raw`,
+    dS70169 = `70169.pred` - `70169.raw`,
+    dS44216 = `44216.pred` - `44216.raw`,
+    dPascalCIttaStudi = `MILANO PASCAL CITT� STUDI.pred` - `MILANO PASCAL CITT� STUDI.raw`,
+    dSENATO = `MILANO - SENATO.pred` - `MILANO - SENATO.raw`,
+    dMARCHE = `MILANO - V.LE MARCHE.pred` - `MILANO - V.LE MARCHE.raw`,
+    dVERZIERE = `MILANO - VERZIERE.pred` - `MILANO - VERZIERE.raw`
+  ) %>%
+  dplyr::select(time, starts_with("d"))  #
+
+df_diff  <- df_diff %>% dplyr::rename(
+    S22851 =dS22851  ,
+    S50128 = dS50128,
+    S24644 =dS24644 ,
+    S32399 =dS32399 ,
+    S40256 =  dS40256,
+    S70169 = dS70169,
+    S44216 =  dS44216,
+    PascalCIttaStudi =  dPascalCIttaStudi,
+    SENATO = dSENATO,
+    MARCHE =   dMARCHE,
+    VERZIERE = dVERZIERE
+    
+)
+
+df_diff <- df_diff %>%
+  pivot_longer(
+    cols = -time,       # Select all columns except 'Date'
+    names_to = "variable",
+    values_to = "Value"
+  )
+```
+
+
+
+
+```{r}
+df_diff <- df_diff %>%
+  pivot_longer(
+    cols = -time,       # Select all columns except 'Date'
+    names_to = "variable",
+    values_to = "Value"
+  )
+```
+
+
+
+```{r}
+
+
+
+
+ggplot(df_diff, aes(x = variable, y = Value, fill = variable)) +
+  geom_boxplot(outlier.shape = 16, outlier.size = 2, alpha = 0.6) + 
+  labs(title = "Distribution of Differences (Observed vs. Predicted)",
+       x = "Prediction Models",
+       y = "Difference (PM10 - Predicted Value)") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1),
+        legend.position = "none")
+```
+
+
+
+
+```{r}
+
+x11(width = 12, height = 8) 
+ggplot(df_diff, aes(x = variable, y = Value, fill = variable)) +
+  geom_violin(alpha = 0.6) +  # Violin plot al posto del boxplot
+  labs(
+       x = "Stations",
+       y = "Difference (PM10 - Predicted Value of Mod3)") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1),
+        legend.position = "none")+
+  scale_fill_brewer(palette = "Paired") 
+
+Sys.sleep(1000)
+```
+
+
+```{r}
+df_kriging <- read_csv("C:/Users/samir/Downloads/dati_tesi/predizioniUK.csv",show_col_types = FALSE, )%>% dplyr::select(PM10,sumMetricModel50Nghbr,day_of_year, lag1, lag7 )   %>% dplyr::rename(PM10krig=PM10, ukpred= sumMetricModel50Nghbr,time= day_of_year )
+df_fam <- read_csv("C:/Users/samir/Downloads/dati_tesi/df_gampred.csv",show_col_types = FALSE, )  
+df_uk <- read_csv("C:/Users/samir/Downloads/dati_tesi/preduk.csv",show_col_types = FALSE, ) %>% dplyr::select(PM10,sumMetricModel50Nghbr,day_of_year, lag1,lag7 )  %>% dplyr::rename(PM10krig1=PM10, ukpred1= sumMetricModel50Nghbr,time= day_of_year )
+```
+
+
+
+
+
+
+```{r}
+#df1 <- df
+df_kriging <- read_csv("C:/Users/samir/Downloads/dati_tesi/.csv",show_col_types = FALSE, )%>% dplyr::select(PM10,sumMetricModel50Nghbr,day_of_year,Continuous_urban_fabric, month,Discontinuous_urban_fabric,day_of_month, v_media,  DirezioneMedia ) 
+```
+
+##################nuovo
+
+
+
+```{r}
+
+```
+
+
+```{r}
+df_kriging <-  data %>% rename(Station="id" )  %>% dplyr::select(PM10,sumMetricModel50Nghbr,day_of_year,Continuous_urban_fabric, month,Discontinuous_urban_fabric,day_of_month, v_media,  DirezioneMedia )  
+```
+
+
+
+```{r}
+prova  <- df_fam   %>% left_join(df_kriging, by= c("PM10","day_of_year","Continuous_urban_fabric", "month","Discontinuous_urban_fabric","day_of_month", "v_media"  ,"DirezioneMedia"))
+```
+
+```{r}
+df_kriging <-  data   %>% dplyr::select("PM10","day_of_year","Station","lag1","lag7","sumMetricModel50Nghbr","Continuous_urban_fabric","DatetimeBegin") %>%
+  mutate(lag1 = round(lag1, 4),
+         lag7 = round(lag7, 4),
+         PM10 = round(PM10, 4)) 
+df_kriging $lag1 <- (df_kriging $lag1 ^lambda - 1) / lambda
+df_kriging $lag7  <- (df_kriging $lag7^lambda - 1) / lambda
+
+```
+
+```{r}
+df_fam <- read_csv("C:/Users/samir/Downloads/dati_tesi/df_gampred.csv",show_col_types = FALSE, )  
+df_fam <- df_fam %>%select("day_of_year","Station","lag1","lag7","Continuous_urban_fabric","Pred3","month", "day_of_month", "DatetimeBegin")  
+df_fam$Station <- as.character(df_fam$Station)
+df_kriging$Station <- as.character(df_kriging$Station)
+```
+
+
+```{r}
+df_kriging %>% dplyr::filter(PM10 == 14.51000  & day_of_year == 7)
+```
+
+```{r}
+df_fam %>% dplyr::filter(PM10 == 14.51000  & day_of_year == 7)
+```
+
+
+
+
+```{r}
+prova  <- df_fam %>%select("day_of_year","Station","DatetimeBegin","Pred3" )    %>% left_join(df_kriging, by= c("day_of_year","Station","DatetimeBegin"))
+```
+
+
+
+```{r}
+##write.csv(prova , "C:/Users/samir/Downloads/dati_tesi/uaaaa.csv", row.names = FALSE)
+```
+
+
+```{r}
+prova  <- df_fam   %>% left_join(df_kriging, by= c("PM10","day_of_year","Continuous_urban_fabric", "month","Discontinuous_urban_fabric","day_of_month", "v_media"  ,"DirezioneMedia"))
+```
+
+
+
+```{r}
+prova  <- df_fam %>% left_join(df_kriging, by= c("PM10","day_of_year","Continuous_urban_fabric", "month","Discontinuous_urban_fabric","day_of_month", "v_media"  ,"DirezioneMedia"))
+```
+
+
+
+
+
+
+
+```{r}
+df_grafico <- prova %>% dplyr::select(DatetimeBegin, Station, PM10, Pred3,sumMetricModel50Nghbr) %>% rename(ObservedData = PM10,
+                                                     Date= DatetimeBegin,
+                                                   PredUk = sumMetricModel50Nghbr,
+                                                   PredGam= Pred3)
+```
+
+
+```{r}
+col_df <- c("ObservedData", "PredUk", "PredGam")
+```
+
+
+
+```{r}
+##"22851"    "24644"  "32399"  "40256"  "44216"  "50128"  "70169"   
+##"MILANO - SENATO"  "MILANO - V.LE MARCHE"   "MILANO - VERZIERE" "MILANO PASCAL CITT� STUDI"
+
+grafico_stazione <- function(stazione = NULL) {
+  if (is.null(stazione)) {
+    stop("Errore: Devi specificare una stazione.")
+  }
+  
+  col_df <- c("ObservedData", "PredUk", "PredGam")
+
+  df_long <- df_grafico %>%
+    pivot_longer(
+      cols = col_df,  
+      names_to = "variable",   
+      values_to = "Value"
+    ) %>% 
+    mutate(Date = as.Date(Date)) %>%  
+    filter(Date >= as.Date("2022-01-01") & Date <= as.Date("2022-04-30"))
+
+  df_long <- df_long %>% filter(Station == stazione)
+
+ 
+
+
+
+  # Definisco i colori e l'ordine corretto
+  color_map <- c("ObservedData" = "darkgreen", 
+                 "PredUk" = "blue", 
+                 "PredGam" = "coral")
+
+  plot <- ggplot(df_long, aes(x = Date, y = Value, color = variable, linetype = variable, size = variable)) +
+    geom_line() +  
+    labs(x = "Date", y = "PM10 Levels") +
+    
+    scale_x_date(date_labels = "%Y-%m-%d", date_breaks = "15 days", expand = expansion(mult = c(0.07, 0.07))) +
+    
+    scale_color_manual(values = color_map) + 
+    scale_linetype_manual(values = c("ObservedData" = "solid", "PredUk" = "solid", "PredGam" = "solid")) +  
+    scale_size_manual(values = c("ObservedData" = 0.6, "PredUk" = 0.75, "PredGam" = 0.75)) +  
+
+    theme_minimal() +  
+    theme(legend.title = element_blank(), 
+          legend.position = c(0.20, 0.98), 
+          legend.direction = "horizontal")
+
+  return(plot)
+}
+
+
+```
+
+##"22851"    "24644"  "32399"  "40256"  "44216"  "50128"  "70169"   
+##"MILANO - SENATO"  "MILANO - V.LE MARCHE"   "MILANO - VERZIERE" "MILANO PASCAL CITT� STUDI"
+
+```{r}
+x11(width = 12, height = 8) 
+grafico_stazione(stazione= "40256")
+  
+Sys.sleep((1000))
+```
+
+
+
+
+
+```{r}
+grafico_stazione(stazione= "MILANO - VERZIERE")
+```
+
+
+
+```{r}
+###"22851"    "24644"  "32399"  "40256"  "44216"  "50128"  "70169"
+grafico_stazione(stazione= "40256")
+```
+
+
+
+
+
+
+
+
+
+
+
+# predizione
+
+
+```{r}
+# Load the shapefile directly from the downloaded local directory
+shapefile_path <- "C://Users/samir/Downloads/dati_tesi/confini_quartieri_milano/Quartieri_Milano.shp"
+# Read the shapefile
+milano <- st_read(shapefile_path)  %>% st_transform(crs = 3035)
+#milano <- as(milano, "Spatial")
+```
+
+```{r}
+milano <-readRDS(
+  "C:/Users/samir/Downloads/dati_tesi/LAU.rds")%>% dplyr::filter( .data$NUTS3_ID == "ITC4C" & .data$LAU_NAME %in% "Milano") %>% rename(geometry = Lau_geometry )  %>% st_transform(milano, crs = 3035)
+# Trasformiamo Milano in EPSG:3035
+milano <- st_transform(milano, crs = 3035)  
+```
+
+
+
+
+```{r}
+ggplot(data = milano) +
+  geom_sf(fill = "lightblue", color = "black") +
+  ggtitle("Confini Quartieri di Milano") +
+  theme_minimal()
+```
+
+
+```{r}
+## Crea una griglia regolare di 500m x 500m dentro Milano
+bbox <- st_bbox(milano)
+x_seq <- seq(bbox$xmin, bbox$xmax, by=500)
+y_seq <- seq(bbox$ymin, bbox$ymax, by=500)
+grid <- expand.grid(x = x_seq, y = y_seq)
+
+# Trasforma in sf object
+grid_sf <- st_as_sf(grid, coords = c("x", "y"), crs = st_crs(milano))
+
+# Verifica quali punti si trovano dentro Milano (ritorna una lista)
+inside <- st_within(grid_sf, milano)
+
+# Converti il risultato in un vettore logico (TRUE se il punto è dentro, FALSE altrimenti)
+inside_logical <- lengths(inside) > 0
+
+# Seleziona solo i punti dentro Milano
+grid_sf <- grid_sf[inside_logical, ]
+```
+
+```{r}
+# Visualizza la mappa della griglia
+plot(st_geometry(milano), col = NA, border = "black")
+plot(st_geometry(grid_sf), col = "red", pch = 20, add = TRUE)
+```
+
+
+
+```{r}
+grid_df <- as.data.frame(st_coordinates(grid_sf))
+colnames(grid_df) <- c("Long", "Lat")
+```
+
+
+
+
+```{r}
+grid_df$id <- 1:nrow(grid_df) 
+grid_df 
+```
+
+
+```{r}
+grid_dfsf<- st_as_sf(grid_df , coords = c("Long", "Lat"), crs = 3035)
+
+```
+## CAMS
+
+
+```{r}
+#ogni punto è il centroide
+# Caricamento dati e rinomina colonne
+#df_cams <- read_csv("C:/Users/samir/Downloads/dati_tesi/cams_completo.csv", show_col_types = FALSE) %>%
+#  rename(Long = lon, Lat = lat, PM10 = pm10, date = DatetimeBegin) %>%
+#  arrange(Long, Lat, date)  # Ordina i dati per Stazione e Tempo
+
+df_cams1 <- read_csv("C:/Users/samir/Downloads/cams21_1.csv", show_col_types = FALSE) %>%
+  rename(Long = lon, Lat = lat, PM10 = pm10, date = DatetimeBegin) 
+df_cams2 <-  read_csv("C:/Users/samir/Downloads/cams23.csv", show_col_types = FALSE) %>%
+  rename(Long = lon, Lat = lat, PM10 = pm10, date = DatetimeBegin)
+
+df_cams <- rbind(df_cams1, df_cams2)
+# Aggiunta lag e interpolazione NA
+df_cams <- df_cams %>%
+  group_by(Long, Lat) %>%
+  mutate(
+    lag1 = lag(PM10, 1),
+    lag7 = lag(PM10, 7)
+  ) %>%
+  ungroup() %>% 
+  filter(date >= as.Date("2021-12-20"))  # Filtra le date dopo il calcolo del lag
+
+# Verifica che il filtro sia applicato correttamente
+print(range(df_cams$date))  # Dovrebbe mostrare la data minima >= "2021-12-20"
+
+# Riempi i valori NA nelle colonne lag1 e lag7
+df_cams <- df_cams %>%
+  group_by(Long, Lat) %>%
+  mutate(
+    lag1 = na.kalman(lag1, model = "StructTS"),
+    lag7 = na.kalman(lag7, model = "StructTS")
+  ) %>%
+  ungroup()  # Assicurati di rimuovere il raggruppamento
+
+# Controllo finale della struttura del dataframe
+print(str(df_cams))  # Assicurati che non sia ancora "grouped_df"
+print(any(is.na(df_cams$lag1)))  # Controlla se ci sono ancora NA
+print(any(is.na(df_cams$lag7)))  # Controlla se ci sono ancora NA
+
+# Converti in sf (GeodataFrame) senza raggruppamenti
+df_sf <- st_as_sf(df_cams, coords = c("Long", "Lat"), crs = 4326) %>%
+  st_transform(crs = 3035)
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+```{r}
+df_cams <- df_cams %>%
+  mutate(unique_id = as.integer(dense_rank(interaction(Long, Lat))))
+
+ camspm10 <- df_cams %>%
+  distinct(Long, Lat, .keep_all = TRUE) %>% # Mantiene solo la prima occorrenza di ogni coppia unica
+  dplyr::select(- date, -PM10, - lag1, -lag7)
+camspm10 <- st_as_sf(camspm10, coords = c("Long", "Lat"), crs = 4326)
+camspm10 <- st_transform(camspm10, crs = 3035)
+```
+
+
+
+
+```{r}
+# camspm10_grid <- camspm10 %>%
+#   mutate(geometry = sf::st_buffer(geometry, dist = 5500,endCapStyle = "SQUARE")) %>% 
+#   # 5 km in tutte le direzioni
+#   dplyr::select(unique_id, geometry)
+
+
+# #nisce i dati di `df_cams` con `camspm10_grid` usando `st_within()`
+# merged_df <- st_intersection(grid_dfsf, camspm10_rect)
+# merged_df <- as.data.frame(merged_df)
+# merged_df
+```
+
+
+
+```{r}
+# Funzione che, dato un singolo punto 'geom', crea un rettangolo
+# spostando i bordi di (left, right, bottom, top) in metri (o unità della proiezione).
+create_custom_rect <- function(geom, left, right, bottom, top) {
+  # Ottieni il bounding box (per un punto, xmin = xmax, ymin = ymax)
+  bb <- st_bbox(geom)
+  
+  # Espandi manualmente i lati
+  bb["xmin"] <- bb["xmin"] - left
+  bb["xmax"] <- bb["xmax"] + right
+  bb["ymin"] <- bb["ymin"] - bottom
+  bb["ymax"] <- bb["ymax"] + top
+  
+  # Converti il bbox in un poligono sf
+  st_as_sfc(bb)
+}
+```
+
+
+```{r}
+camspm10_rect <- camspm10 %>%
+  rowwise() %>%
+  mutate(geometry = create_custom_rect(
+    geom   = geometry,
+    left   = 3000,
+    right  = 4800,
+    bottom = 6000,
+    top    = 5000
+  )) %>%
+  ungroup()
+```
+
+
+
+```{r}
+ggplot() +
+  geom_sf(data = camspm10_rect , fill = "lightblue", color = "black", alpha = 0.5) +  # Griglia
+ # Vertici
+  geom_sf(data = milano, fill = NA, color = "black", size = 1) +  # Confine Milano
+  theme_minimal() +
+  labs(title = "Grid, Corners, and Milano")
+
+```
+
+```{r}
+library(raster)
+```
+
+
+```{r}
+r <- raster(extent(camspm10_rect), 
+            resolution = c(10000, 10000),   # cellsize 10 km x 10 km
+            crs = st_crs(camspm10_rect)$proj4string)
+
+# 2. Rasterizza i poligoni usando il campo unique_id.
+#    Se un pixel interseca più poligoni, usa il primo (fun = "first")
+r_unique <- rasterize(camspm10_rect, r, field = "unique_id", fun = "first")
+
+# 3. Estrai per ogni punto della griglia il valore di unique_id dal raster.
+# Convertiamo grid_dfsf in oggetto Spatial, se necessario.
+grid_dfsf_sp <- as(grid_dfsf, "Spatial")
+grid_dfsf$unique_id <- extract(r_unique, grid_dfsf_sp)
+```
+
+
+```{r}
+coords <- st_coordinates(grid_dfsf)
+grid_dfsf <- grid_dfsf %>%
+  mutate(Long = coords[,1],
+         Lat = coords[,2])
+
+# Ora, se vuoi eliminare la geometria e mantenere solo le colonne (inclusi Long, Lat, e eventuali altri attributi)
+ok <- grid_dfsf %>% 
+  st_drop_geometry() %>% 
+  as.data.frame()
+```
+
+
+
+```{r}
+date_seq <- seq(as.Date("2022-01-01"), as.Date("2023-12-31"), by = "day")
+
+# 2. Convertilo in un data frame con una chiave fittizia
+date_seq <- data.frame(date = date_seq, key = 1)
+oks <- ok %>%
+  mutate(key = 1)
+```
+
+```{r}
+oks<- oks %>%
+  inner_join(date_seq, by = "key") %>%
+  dplyr::select(-key) %>% mutate(unique_id = as.integer(unique_id), date = as.Date(date)) 
+
+
+# grid %>% group_by( Long, Lat) %>%
+#    summarize(n = n_distinct(date)) %>%  arrange(n)
+```
+```{r}
+df_cams_filtered <- df_cams %>% filter(unique_id %in% unique(oks$unique_id))
+df_cams_filtered <- df_cams_filtered %>% mutate(date = as.Date(date))
+primo_step <- oks %>%
+ 
+  left_join(
+  df_cams_filtered  %>%
+      dplyr::select(-Long, -Lat) %>%
+      mutate(unique_id = as.integer(unique_id), date = as.Date(date)),
+    by = c("unique_id", "date")
+  )
+
+#primo_step <- primo_step %>%
+ # dplyr::select(-geometry)  
+
+```
+
+
+
+
+## Covariate metereologiche
+
+```{r}
+df_meteo<- read_csv("C:/Users/samir/Downloads/dati_tesi/era5land_completos.csv", show_col_types = FALSE)  %>% dplyr::select("DatetimeBegin", "Latitude","Longitude","Temp","Rad","maxRad", "Prec",           "maxPrec","Umidit", "u_media" , "v_media", "VelVentoMedia","season", "DirezioneMedia" ,"maxUmidit" ,"minUmidit")  %>% rename(Long= Longitude, Lat = Latitude, date= DatetimeBegin)
+```
+
+
+```{r}  
+#12
+df_meteo <- df_meteo %>%
+  group_by(Long, Lat) %>%
+  mutate(unique_id = cur_group_id()) %>%
+  ungroup()
+```
+
+```{r}
+ camspm10 <- df_meteo %>%
+  distinct(Long, Lat, .keep_all = TRUE) %>% # Mantiene solo la prima occorrenza di ogni coppia unica
+  dplyr::select(- date, -Temp, -Umidit,- u_media, -v_media,- VelVentoMedia, -Source, -day_of_year , -season)
+camspm10 <- st_as_sf(camspm10, coords = c("Long", "Lat"), crs = 4326)
+camspm10 <- st_transform(camspm10, crs = 3035)
+```
+
+
+```{r}
+camspm10_rect <- camspm10 %>%
+  rowwise() %>%
+  mutate(geometry = create_custom_rect(
+    geom   = geometry,
+    left   = 3000,
+    right  = 4800,
+    bottom = 6000,
+    top    = 5000
+  )) %>%
+  ungroup()
+```
+
+
+
+
+
+
+```{r}
+camspm10_rect <- camspm10 %>%
+  rowwise() %>%
+  mutate(geometry = create_custom_rect(
+    geom   = geometry,
+    left   = 3000,
+    right  = 4800,
+    bottom = 6030,
+    top    = 5000
+  )) %>%
+  ungroup()
+```
+
+```{r}
+ggplot() +
+  geom_sf(data = camspm10_rect , fill = "lightblue", color = "black", alpha = 0.5) +  # Griglia
+ # Vertici
+  geom_sf(data = milano, fill = NA, color = "black", size = 1) +  # Confine Milano
+  theme_minimal() +
+  labs(title = "Grid, Corners, and Milano")
+
+```
+
+```{r}
+r <- raster(extent(camspm10_rect), 
+            resolution = c(10000, 10000),   # cellsize 10 km x 10 km
+            crs = st_crs(camspm10_rect)$proj4string)
+
+# 2. Rasterizza i poligoni usando il campo unique_id.
+#    Se un pixel interseca più poligoni, usa il primo (fun = "first")
+r_unique <- rasterize(camspm10_rect, r, field = "unique_id", fun = "first")
+
+# 3. Estrai per ogni punto della griglia il valore di unique_id dal raster.
+# Convertiamo grid_dfsf in oggetto Spatial, se necessario.
+grid_dfsf_sp <- as(grid_dfsf, "Spatial")
+grid_dfsf$unique_id <- extract(r_unique, grid_dfsf_sp)
+```
+
+
+
+
+```{r}
+stazioni_aria <- read_csv("C:/Users/samir/Downloads/dati_tesi/info_stazioni_aria.csv",show_col_types = FALSE, ) %>%
+  sf::st_as_sf(coords = c("Long", "Lat"), crs = 4326)
+sf_data <- st_as_sf(stazioni_aria, wkt = "geometry", crs = 4326) %>% 
+  st_transform(3035)
+
+sf_data_sp <- as(sf_data, "Spatial")
+sf_data$unique_id <- extract(r_unique, sf_data_sp)
+
+coordss <- st_coordinates(sf_data)
+sf_data <- sf_data %>%
+  mutate(Long = coordss[,1],
+         Lat = coordss[,2])
+
+# Ora, se vuoi eliminare la geometria e mantenere solo le colonne (inclusi Long, Lat, e eventuali altri attributi)
+sf_data <- sf_data %>% 
+  st_drop_geometry() %>% 
+  as.data.frame()
+
+date_seq <- seq(as.Date("2022-01-01"), as.Date("2023-12-31"), by = "day")
+
+# 2. Convertilo in un data frame con una chiave fittizia
+date_seq <- data.frame(date = date_seq, key = 1)
+sf_data <- sf_data %>%
+  mutate(key = 1)
+
+
+sf_data<- sf_data %>%
+  inner_join(date_seq, by = "key") %>%
+  dplyr::select(-key)
+
+
+```
+
+```{r}
+sf_datas <-sf_data %>% left_join(df_meteo %>% dplyr::select(-Lat, -Long) , by= c("unique_id", "date"))
+```
+
+
+```{r}
+write.csv(sf_datas , "C:/Users/samir/Downloads/dati_tesi/dataset_trainV.csv", row.names = FALSE)
+```
+
+
+
+
+
+```{r}
+coords <- st_coordinates(grid_dfsf)
+grid_dfsf <- grid_dfsf %>%
+  mutate(Long = coords[,1],
+         Lat = coords[,2])
+
+# Ora, se vuoi eliminare la geometria e mantenere solo le colonne (inclusi Long, Lat, e eventuali altri attributi)
+ok <- grid_dfsf %>% 
+  st_drop_geometry() %>% 
+  as.data.frame()
+
+
+```
+
+
+
+
+```{r}
+date_seq <- seq(as.Date("2022-01-01"), as.Date("2023-12-31"), by = "day")
+
+# 2. Convertilo in un data frame con una chiave fittizia
+date_seq <- data.frame(date = date_seq, key = 1)
+ok <- ok %>%
+  mutate(key = 1)
+```
+
+```{r}
+ok<- ok %>%
+  inner_join(date_seq, by = "key") %>%
+  dplyr::select(-key)
+
+
+# grid %>% group_by( Long, Lat) %>%
+#    summarize(n = n_distinct(date)) %>%  arrange(n)
+```
+
+
+```{r}
+secondo_step <- ok %>% left_join(df_meteo %>% dplyr::select(-Lat, -Long) , by= c("unique_id", "date"))
+secondo_step$Source <- 0 #arpa
+```
+
+
+```{r}
+ dataset_pred <- primo_step %>% dplyr::select( -unique_id)   %>% left_join (secondo_step %>% dplyr::select(- unique_id), by= c("id", "date"))
+```
+
+```{r}
+ dataset_pred1 <- primo_step %>% dplyr::select( -unique_id)   %>% left_join (secondo_step %>% dplyr::select(- unique_id), by= c("id", "date"))
+```
+
+
+```{r}
+#write.csv(dataset_pred1, "C:/Users/samir/Downloads/dati_tesi/dataset_predtot.csv", row.names = FALSE)
+```
+
+
+
+```{r}
+sf_data <- st_as_sf(stazioni_aria, wkt = "geometry", crs = 4326) %>% 
+  st_transform(3035)
+
+```
+
+
+
+
+
+
+```{r}
+
+
+
+ids <- sort(unique(df1$id))  #ordino indici
+res5 <- matrix(NA, ncol = length(ids), nrow = 730, dimnames = list(NULL, ids))
+
+
+# Ciclo per riempire la matrice con i valori previsti per ciascun ID
+for (i in seq_along(ids)) {
+  id_value <- ids[i]  # Ottieni il valore dell'ID corrente
+  df_subset <- df1[df1$id == id_value, ]  # Filtro per ID specifico
+  
+  # Verifica che il subset abbia dati prima di fare la predizione
+  if (nrow(df_subset) > 0) {
+    pred <- predict(mod4, newdata = df_subset, se.fit = TRUE, type = "response")  
+    pred1 <- back_coxcox(pred = pred)  # Applichiamo il back-transform
+  
+    # Inseriamo i valori nella colonna corrispondente
+    res5[1:length(pred1), i] <- pred1  
+  }
+}
+
+
+
+
+
+
+
+```
+
+```{r}
+dataset_pred <- dataset_pred %>% mutate(id = as.integer(id))
+res_long10 <- res_long10 %>% mutate(id = as.integer(id))
+
+dataset_pred <- dataset_pred %>% left_join(res_long10, by = c("time", "id"))
+```
+
+
+```{r}
+res_long10 <- as.data.frame(res10) %>%
+  mutate(time = 1:730) %>%
+  pivot_longer(cols = -time, names_to = "Station", values_to = "Pred10")
+df <- df %>%
+  left_join(res_long10, by = c("time", "Station"))
+```
+
+
+
+
+
+
+
+
+
+```{r}
+grid_df$PM10_pred <- predict(mod1, newdata = grid_df)
+```
+```{r}
+colnames(df_era5land)
+```
+
+```{r}
+library(dplyr)
+library(sf)
+library(tidyverse)
+library(imputeTS)
+library(ggplot2)
+library(mgcv)
+```
+
+
+```{r}
+df <- read_csv("C:/Users/samir/Downloads/dati_tesi/df_totale.csv",show_col_types = FALSE, )  
+```
+
+```{r}
+df_sf <- st_as_sf(df, coords = c("Long", "Lat"), crs = 4326)
+df_sf <- st_transform(df_sf, crs = 3035)
+
+# Aggiungo le nuove coordinate al dataframe
+df$Long <- st_coordinates(df_sf)[,1]
+df$Lat <- st_coordinates(df_sf)[,2]
+```
+
+```{r}
+df <- booox(df=df )
+```
+
+
+#############################################################################à
+
+```{r}
+df_pred <- read_csv("C:/Users/samir/Downloads/dati_tesi/dataset_predtot.csv",show_col_types = FALSE, )  %>% dplyr::select(- Long.y, -Lat.y) %>% rename(Long= Long.x, Lat= Lat.x)
+```
+
+
+
+
+```{r}
+df_pred <- df_pred %>%
+  arrange(id, date) %>%  # Ordina i dati per Stazione e Tempo
+  group_by(id) %>%  # Raggruppa per stazione
+  mutate(
+    month = month(date),
+    day_of_month = day(date),
+    time = as.numeric(1+ date - min(date))
+  ) %>%
+  ungroup() 
+
+```
+
+
+
+
+
+
+
+
+
+
+```{r}
+booox <- function( df= NULL ){
+  
+  lambda <- 0.3838384
+df$PM10_trans <- (df$PM10^lambda - 1) / lambda
+df$lag1 <- (df$lag1 ^lambda - 1) / lambda
+df$lag7  <- (df$lag7^lambda - 1) / lambda
+df$season <- as.factor(df$season)
+df$Source <- as.factor(df$Source)
+
+  return(df)
+}
+
+```
+
+
+
+```{r}
+dfsensore <- booox(df=df_pred )
+```
+
+
+
+```{r}
+dfsensoreslice <- dfsensore %>% dplyr::filter(date >=  as.Date("2022-06-01") & date <=  as.Date("2022-06-07") ) 
+dfsensoreslice1 <- dfsensoreslice
+```
+
+
+
+
+```{r}
+## con fondo
+back_coxcox <- function(pred = NULL){
+  min_value = 0.1
+  sigma <- pred$se.fit^2
+  raw <- (lambda * pred$fit + 1)^(1/lambda)
+  bias_adj <- 1+ sigma * ((1- lambda)^2/2) * (lambda * pred$fit +1)^(2*(1- lambda))
+  
+  pred_adj  <-  raw * bias_adj
+  pred_adj <- pmax(pred_adj, min_value)
+  return(pred_adj)
+}
+```
+
+
+
+
+```{r}
+predizioni_gam <- function(df_pred= NULL, mod= NULL ) {
+
+ids <- sort(unique(df_pred$id))  #ordino indici
+n_rows <- nrow(df_pred)
+res5 <- matrix(NA, ncol = length(ids), nrow =  n_rows, dimnames = list(NULL, ids))
+
+
+# Ciclo per riempire la matrice con i valori previsti per ciascun ID
+for (i in seq_along(ids)) {
+  id_value <- ids[i]  # Ottieni il valore dell'ID corrente
+  df_subset <- df_pred[df_pred$id == id_value, ]  # Filtro per ID specifico
+  
+  # Verifica che il subset abbia dati prima di fare la predizione
+  if (nrow(df_subset) > 0) {
+    pred <- predict(mod, newdata = df_subset, se.fit = TRUE, type = "response")  
+  #  pred1 <- back_coxcox(pred = pred)  # Applichiamo il back-transform
+   pred1 <- pred$fit
+    # Inseriamo i valori nella colonna corrispondente
+    res5[1:length(pred1), i] <- pred1 
+  }
+}
+res_long <- as.data.frame(res5) %>%
+  mutate(day_of_year = 1:n_rows) %>%
+  pivot_longer(cols = -day_of_year , names_to = "id", values_to = "Pred10") 
+
+
+return( list(long= res_long,
+             res= res5))
+}
+
+```
+
+
+```{r}
+dfsensoreslice<- dfsensoreslice %>% dplyr::select(Long, Lat, day_of_year,Temp,u_media, v_media, Umidit, VelVentoMedia, lag1, lag7, season,id,PM10_trans,Source,time)
+```
+
+
+```{r}
+ok <- predizioni_gam(mod =  mod12  , df_pred = dfsensoreslice)
+```
+
+```{r}
+summary(mod12)
+```
+
+
+```{r}
+ok11 <- ok$long %>%  mutate(id = as.numeric(id))
+```
+
+
+```{r}
+ok111 <- ok11%>% left_join(dfsensore, by = c("id", "day_of_year") )
+#7840935
+```
+
+```{r}
+dfsensoreslice$Source <-  as.numeric(dfsensoreslice$Source)
+```
+
+
+```{r}
+crossStat("Pred10",df= ok111, digits=2)
+```
+
+
+
+```{r}
+ok1 <- predizioni_gam(mod = mod11, df_pred = dfsensore)
+```
+
+```{r}
+ 
+```
+
+
+
+```{r}
+mod12 <- gam(PM10_trans ~
+                 -1 + ti(Long, Lat, day_of_year, bs = c("tp", "tp","cr"), k = c(4,4, 5)) +
+                 s(Long, Lat, bs = c("tp", "tp"), k = 4) +
+                       s(day_of_year, bs = "cr" , k = 5) +
+                       s(Temp, bs = "tp") +
+                       s(u_media, bs = "tp") +
+                       s(v_media, bs = "tp") +
+                       s(Umidit, bs = "tp") +
+                       s(VelVentoMedia, bs = "tp") +
+                       s(lag7, bs = "tp") +
+                       s(lag1, bs = "tp") +
+                      s(season, k=4, bs="re")+ s(Source, k=2, bs="re"),
+               data = df, method = "REML") 
+```
+
+
+```{r}
+
+###ok
+ mod11 <- gam(PM10_trans ~
+                 -1 + ti(Long, Lat, day_of_year, bs = c("tp", "tp","cr"), k = c(2,2, 2)) +
+                 s(Long, Lat, bs = c("tp", "tp"), k = 2) +
+                       s(day_of_year, bs = "cr" , k = 2) +
+                       s(Temp, bs = "cr") +
+                       s(u_media, bs = "cr") +
+                       s(v_media, bs = "cr") +
+                       s(Umidit, bs = "cr") +
+                       s(VelVentoMedia, bs = "cr") +
+                       s(lag7, bs = "cr") +
+                       s(lag1, bs = "cr") +
+                      s(season, k=2, bs="re") +s(Source, k=2, bs="re"),
+               data = df, method = "REML", gamma= 1.6,family = scat()) 
+#  + s(Source, k=2, bs="re")
+```
+
+
+```{r}
+
+##provato ora
+ mod12 <- gam(PM10_trans ~
+                 -1 + ti(Long, Lat, day_of_year, bs = c("tp", "tp","cr"), k = c(4,4, 4)) +
+                 s(Long, Lat, bs = c("tp", "tp"), k = 4) +
+                       s(day_of_year, bs = "cr" , k = 4) +
+                       s(Temp, bs = "cr") +
+                       s(u_media, bs = "cr") +
+                       s(v_media, bs = "cr") +
+                       s(Umidit, bs = "cr") +
+                       s(VelVentoMedia, bs = "cr") +
+                       s(lag7, bs = "cr") +
+                       s(lag1, bs = "cr") +
+                     season+Source,
+               data = df, method = "REML", gamma= 1.5) 
+```
+
+
+
+
+
+
+```{r}
+mod12 <- gam(PM10_trans ~
+                 -1 + ti(Long, Lat, day_of_year, bs = c("tp", "tp","cr"), k = c(4,4, 5)) +
+                 s(Long, Lat, bs = c("tp", "tp"), k = 4) +
+                       s(day_of_year, bs = "cr" , k = 5) +
+                       s(Temp, bs = "tp") +
+                       s(u_media, bs = "tp") +
+                       s(v_media, bs = "tp") +
+                       s(Umidit, bs = "tp") +
+                       s(VelVentoMedia, bs = "tp") +
+                       s(lag7, bs = "tp") +
+                       s(lag1, bs = "tp") +
+                      s(season, k=4, bs="re")+ s(Source, k=2, bs="re"),
+               data = df, method = "REML") 
+```
+
+
+
+
+
+```{r}
+ mod10 <- gam(PM10_trans ~
+                  ti(Long, Lat, day_of_year, bs = c("tp", "tp","cr"), k = c(4,4, 4)) + ti(Temp, Umidit)+
+                 s(Long, Lat, bs = c("tp", "tp"), k = 4) +
+                       s(day_of_year, bs = "cr" , k = 5) +
+                       s(Temp, bs = "tp") +
+                       s(u_media, bs = "tp") +
+                       s(v_media, bs = "tp") +
+                       s(Umidit, bs = "tp") +
+                       s(VelVentoMedia, bs = "tp") +
+                       s(lag7, bs = "ts") +
+                       s(lag1, bs = "ts") +
+                       s(day_of_month, bs = "ts") +
+                      s(season, k=4, bs="re")+ s(Source, k=2, bs="re")
+            ,
+               data = df, method = "REML",family = scat()) 
+  
+```
+
+
+```{r}
+mod4 <- gam(PM10_trans ~
+                 -1 + ti(Long, Lat, day_of_year, bs = c("tp", "tp","cr"), k = c(5,5, 5)) +
+                 s(Long, Lat, bs = c("tp", "tp"), k = 5) +
+                       s(day_of_year, bs = "cr" , k = 5) +
+                       s(Temp, bs = "cr") +
+                       s(u_media, bs = "cr") +
+                       s(v_media, bs = "cr") +
+                       s(Umidit, bs = "cr") +
+                       s(VelVentoMedia, bs = "cr") +
+                       s(lag7, bs = "ts") +
+                       s(lag1, bs = "ts") +
+                      s(season, k=4, bs="re")+ s(Source, k=2, bs="re"),
+               data = df, method = "REML", gamma= 1.5,family = scat()) 
+```
+
+
+
+
+
+```{r}
+rbind(crossStat("Pred1",df= df, digits=2),
+      crossStat("Pred2",df= df, digits=2),
+      crossStat("Pred3",df= df, digits=2),
+      crossStat("Pred4",df= df, digits=2))
+```
+
+```{r}
+patial_ok <- ok111 %>% 
+  filter(is.na(Pred10) & !is.na(Long) & !is.na(Lat)) %>% 
+  st_as_sf(coords = c("Long", "Lat"), crs = 3035)
+
+```
+
+
+```{r}
+NA_points <- sf_data %>% filter(is.na(ok ))
+```
+
+

@@ -1,0 +1,1615 @@
+---
+title: "meteorological_factors"
+output: html_document
+date: "2024-12-14"
+---
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+```{r}
+library(readr)
+library(dplyr)
+library(lubridate)
+library(stringr)
+#library(ggplot2)
+#library(sf)
+library(forecast)
+library("tidyr")
+
+#library("imputeTS")
+library("gstat")
+library("patchwork")
+library("data.table")
+library("reshape2") # per heatmap
+library("corrplot")
+library("tidyr") #
+```
+
+
+
+# mappa stazione
+
+
+
+
+
+```{r}
+#data_lau<- EEAaq::EEAaq_get_data(
+ # zone_name = "15146",      # LAU zone code
+ # NUTS_level = "LAU",       # NUTS level
+ # LAU_ISO = "IT",           # Country code for Italy
+ # pollutants = "PM10",       # Pollutant 
+ # from = "2021-12-24",      # Start date
+ # to = "2023-12-31",        # End date
+ # verbose = FALSE  )          # Print detailed progress
+
+```
+
+
+
+
+
+```{r}
+comuni_limitrofi <- c(
+"Assago","Baranzate","Bollate","Bresso","Buccinasco","Cesano Boscone","Cologno Monzese","Cormano","Corsico","Novate Milanese","Opera","Pero","Peschiera Borromeo","Rozzano","San Donato Milanese","Segrate","Sesto San Giovanni","Settimo Milanese","Vimodrone", "Trezzano sul Naviglio", "Cusago", "Arese", "Opera", "Rho", "Baggio", "Cusago", "Cinisello Balsamo", "Cologno Monzese", "Baranzate" )
+milano <-readRDS(
+  "C:/Users/samir/Downloads/dati_tesi/LAU.rds")%>% dplyr::filter( .data$NUTS3_ID == "ITC4C" & .data$LAU_NAME %in% "Milano") %>% rename(geometry = Lau_geometry ) 
+mappa_milano <- readRDS(
+  "C:/Users/samir/Downloads/dati_tesi/LAU.rds")%>% dplyr::filter( .data$NUTS3_ID == "ITC4C" & .data$LAU_NAME %in% comuni_limitrofi) %>% rename(geometry = Lau_geometry ) 
+```
+
+
+
+
+```{r}
+stazioni_aria <- read_csv("C:/Users/samir/Downloads/dati_tesi/info_stazioni_aria.csv",show_col_types = FALSE, ) %>%
+  sf::st_as_sf(coords = c("Long", "Lat"), crs = 4326)
+```
+
+
+la mappa viene colorata in base al tipo di fonte
+```{r}
+
+color <- "TRUE"
+build_map <- ggplot2::ggplot() +
+        ggplot2::geom_sf(data = mappa_milano, fill = NA, lwd = .2, col = "black") +
+        ggplot2::geom_sf(data = milano, fill = "#F7F7F7", lwd = .4, col = "black") +
+        switch(as.character(color),
+               "TRUE" = {ggplot2::geom_sf(data = stazioni_aria, ggplot2::aes(col = .data$Source))},
+               "FALSE" = {ggplot2::geom_sf(data = stazioni_aria, col = "black")}
+        ) +ggplot2::scale_color_manual(
+    values = c("#94d2bd",   "#deab90")  # <- custom colors here
+  ) +
+        ggplot2::labs(x = "Long", y = "Lat") +
+        ggplot2::theme_bw() +
+        ggplot2::theme(legend.position = "bottom")  # Posiziona la legenda sotto la mappa
+#x11(width = 12, height = 8)
+build_map
+
+  
+#Sys.sleep((10))
+```
+
+
+
+ calcolo distanze tra stazioni
+```{r}
+sf_data <- st_as_sf(stazioni_aria, wkt = "geometry", crs = 4326) %>% 
+  st_transform(32632)
+
+```
+
+```{r}
+# Calcolare la matrice delle distanze
+distance_matrix <- st_distance(sf_data)
+
+# Convertire in un data frame per analisi più facili
+distance_df <- as.data.frame(as.matrix(distance_matrix))
+colnames(distance_df) <- sf_data$StationName
+rownames(distance_df) <- sf_data$StationName
+```
+
+
+
+scatterplot umidita verso pm10 per sensori e stazione
+
+```{r}
+wide <- air_sensor %>% dplyr::select(sensor_id,DatetimeBegin, PM10) %>%
+     pivot_wider(
+    names_from = sensor_id,
+    values_from = PM10)
+# Unire i dati wide di PM10 con i dati di umidità
+wide_with_humidity <- wide %>%
+  left_join(df_giornaliero %>% dplyr::select(DatetimeBegin, Umidit), by = "DatetimeBegin")
+
+# Creare lo scatterplot per ciascun sensore
+pm10_columns <- colnames(wide_with_humidity)[-c(1, ncol(wide_with_humidity))]  # Esclude DatetimeBegin e Umidit
+
+# Creazione di un long dataset per il plotting
+long_data <- wide_with_humidity %>%
+  pivot_longer(cols = all_of(pm10_columns), names_to = "sensor_id", values_to = "PM10")
+
+# Scatterplot
+ggplot(long_data, aes(x = Umidit, y = PM10, color = sensor_id)) +
+  geom_point(alpha = 0.6) +
+  facet_wrap(~sensor_id, scales = "free") +  # Creare un grafico separato per ciascun sensore
+  labs(
+    x = "Umidità (%)",
+    y = expression(paste("PM10 (", mu, "g/m^3", ")")),
+    title = "Relazione tra Umidità e PM10 per ciascun Sensore",
+    color = "Sensore"
+  ) +
+  theme_minimal() +
+  theme(
+    strip.text = element_text(face = "bold", size = 10),
+    legend.position = "none"
+  )
+```
+
+
+```{r}
+pm10_milano <- readr::read_delim(
+  "C:/Users/samir/Downloads/dati_tesi/pm10_milano_EU.csv",
+  delim = ",", 
+  show_col_types = FALSE
+)
+```
+
+
+
+
+
+```{r}
+ts_pm <- pm10_milano %>%
+  dplyr::select("PM10", "DatetimeBegin") %>%
+  mutate(DataGiorno = as.Date(DatetimeBegin)) %>%  
+  filter(!is.na(PM10)) %>%  # Rimuove valori mancanti
+  arrange(DataGiorno) %>%           # Ordina i dati temporalmente
+  pull(PM10) %>%           # Estrae la colonna Medio_prec come vettore numerico
+  ts(frequency = 7, start = c(2022, 1))  # freq settimanale osservazioni per anno)
+
+# Decomposizione STL
+decomp <- stl(ts_pm, s.window = "periodic")
+
+# Visualizza la decomposizione
+
+autoplot(decomp) +
+  labs(
+    title = "Decomposizione STL della Precipitazione Giornaliera",
+    x = "Anno",
+    y = "Precipitazione (mm)"
+  )
+```
+
+
+
+
+```{r}
+air_sc23_24<- readr::read_delim(
+  "C:/Users/samir/Downloads/dati_tesi/air_sc23_24.csv",
+  delim = ",", 
+  show_col_types = FALSE
+)
+air_sc22_23 <- readr::read_delim(
+  "C:/Users/samir/Downloads/dati_tesi/air_sc22_23.csv",
+  delim = ",", 
+  show_col_types = FALSE
+)
+air_sensor <- bind_rows(air_sc23_24, air_sc22_23)
+```
+
+
+
+
+
+
+```{r}
+#aggrego a livello giornaliero
+air_sensor <- air_sensor %>%  
+  mutate(DatetimeBegin = as.Date(timestamp, format = "%Y-%m-%d")) %>%  
+  group_by(sensor_id,DatetimeBegin,  location, lon, lat, ) %>%  
+  summarize(PM10 = round(mean(PM1, na.rm = TRUE), 2), .groups = "drop") %>%
+  ungroup()
+```
+
+
+```{r}
+ts_pm1 <- air_sensor %>%
+  dplyr::select("PM10", "DatetimeBegin") %>%
+  filter(!is.na(PM10)) %>%  # Rimuove valori mancanti
+  arrange(DatetimeBegin)            # Ordina i dati temporalmente
+          # Estrae la colonna Medio_prec come 
+ts_pm1 <-ts(ts_pm1$PM10, frequency = 7, start = c(2022, 1))
+# Decomposizione STL
+decomp1 <- stl(ts_pm1, s.window = "periodic")
+
+# Visualizza la decomposizione
+
+autoplot(decomp1) +
+  labs(
+    title = "Decomposizione STL della Precipitazione Giornaliera",
+    x = "Anno",
+    y = "Precipitazione (mm)"
+  )
+```
+
+
+
+
+```{r}
+ok1 <- pm10_milano %>%
+  dplyr::select("PM10", "DatetimeBegin") %>%
+  mutate(DataGiorno = as.Date(DatetimeBegin),
+         Tipo= "Monitoring stations") %>%  
+  filter(!is.na(PM10)) %>%  # Rimuove valori mancanti
+    dplyr::select("PM10","Tipo","DataGiorno" )
+
+ok2 <-  air_sensor %>%
+  mutate(Tipo= "Low-cost sensors") %>%
+  dplyr::select("PM10","Tipo","DataGiorno" )
+ok3<- bind_rows(ok1, ok2)
+```
+
+```{r}
+ok3 %>%
+  mutate(year = as.numeric(format(DataGiorno, '%Y'))) %>% 
+  group_by(Tipo, year) %>% 
+  summarise(
+    who_lim = sum(PM10 > 45, na.rm = TRUE), # Conta i giorni sopra il limite WHO
+    eu_lim = sum(PM10 > 50, na.rm = TRUE)  # Conta i giorni sopra il limite EU
+  )
+  
+
+```
+
+
+```{r}
+plot_1 <- ggplot(ok3, aes(x = DataGiorno, y = PM10, color = Tipo)) +
+  geom_line(size = 0.7, alpha = 0.8) +
+  geom_smooth(method = "loess", size = 0.8) +
+  # Linee orizzontali senza inherit.aes
+  geom_hline(aes(yintercept = 50, linetype = "Daily EU limits"), color = "orange", size = 1.3) +
+  geom_hline(aes(yintercept = 45, linetype = "Daily WHO limits"), color = "purple", size = 1.3) +
+  scale_colour_manual(values = c(
+    "Monitoring stations" = "red",
+    "Low-cost sensors" = "#256d7b"
+  ))  + 
+  scale_linetype_manual(values = c(
+    "Daily EU limits" = "dashed",
+    "Daily WHO limits" = "dashed"
+  )) +
+  labs(x = "Date",
+       y = expression(paste("PM10 (", mu, "g/m^3", ")")), # Formattazione 
+       color = NULL,
+       linetype = NULL)  +
+  theme_minimal() +
+  theme(
+    axis.text.x = element_text(angle = 0, hjust = 0.5),
+    axis.title.x = element_text(hjust = 0.5),
+    legend.position = "top",
+    legend.title = element_text(face = "bold")
+  )
+```
+
+```{r}
+plot_1
+```
+
+
+
+
+
+
+
+
+
+
+# pre-processing
+
+## fattori meteorologici
+
+```{r}
+install.packages("reshape2")
+```
+
+
+
+
+
+```{r}
+stazioni_meteo <- c("Milano Lambrate","Milano P.zza Zavattari" ,"Milano v.Brera"   ,"Milano v.Feltre" ,"Milano v.Juvara" , "Milano v.Marche"  )     
+mappa_meteo <- read_delim(
+  "C:/Users/samir/Downloads/dati_tesi/ds699_stazioni-meteorologiche_arpa_mi_final.csv",
+  delim = ";", 
+  show_col_types = FALSE
+)   %>% dplyr::select("IdStazione","NomeStazione", "Quota", "lng","lat" ) %>% 
+  dplyr::mutate(Source = "ARPA")  %>%
+  dplyr::filter(.data$NomeStazione %in% stazioni_meteo ) %>% dplyr::distinct() %>%
+  sf::st_as_sf(coords = c("lng", "lat"), crs = 4326)
+```
+
+
+```{r}
+unique_sources <- unique(mappa_meteo$Source)
+ build_map <- ggplot2::ggplot() +
+  ggplot2::geom_sf(data = mappa_milano, fill = NA, lwd = .2, col = "black") +
+  ggplot2::geom_sf(data = milano, fill = "#F7F7F7", lwd = .4, col = "black") +
+  ggplot2::geom_sf(data = mappa_meteo, ggplot2::aes(col = .data$Source)) + 
+  ggplot2::scale_color_manual(values = setNames(rep("orange", length(unique_sources)), unique_sources)) +
+  ggplot2::labs(x = "Long", y = "Lat") +
+  ggplot2::theme_bw() +
+ ggplot2::theme(legend.position = "bottom")
+```
+
+```{r}
+build_map
+```
+
+
+
+
+
+
+
+
+
+```{r}
+df_meteo <- readr::read_delim("C:/Users/samir/Downloads/dati_tesi/geo_meteo22_23.csv", 
+     delim = ",", escape_double = FALSE, trim_ws = TRUE,show_col_types = FALSE)
+df_meteo <- df_meteo %>%
+  rename_with(~ stringr::str_replace_all(., "\\s+", ""))  %>% 
+  mutate(across(starts_with("Medio_"), ~ na_if(.x, -999)))   %>%
+  rename(DataOra="Data-Ora" )%>% data.table::as.data.table()
+```
+
+La velocità e la direzione del vento richiedono una gestione particolare perché la velocità è una variabile continua, mentre la direzione è una variabile circolare (da 0° a 360°). È necessario convertire la direzione del vento in componenti cartesiane (u, v) per rappresentare il vento come vettore.
+u rappresenta il vettore orizzontale del vento.
+v rappresenta il vettore verticale del vento
+
+
+```{r}
+df_stazioni_meteo <- df_meteo %>%
+  mutate(
+    DatetimeBegin = as.Date(DataOra),
+    # Calcolo delle componenti u e v
+    u = -Medio_velvento * sin(Medio_dirvento * pi / 180),  # Conversione in radianti
+    v = -Medio_velvento * cos(Medio_dirvento * pi / 180)
+  ) %>%
+  group_by(DatetimeBegin, NomeStazione) %>%
+  summarize(
+    Temp = ifelse(all(is.na(Medio_temp)), NA_real_, round(mean(Medio_temp, na.rm = TRUE), 2)),  # Media temperatura
+    Rad = ifelse(all(is.na(Medio_radglob)), NA_real_, sum(Medio_radglob, na.rm = TRUE)),  # Somma radiazione
+    maxRad= ifelse(all(is.na(Medio_radglob)), NA_real_, max(Medio_radglob, na.rm = TRUE)),  # Somma radiazione
+    Umidit = ifelse(all(is.na(Medio_umidrel)), NA_real_, round(mean(Medio_umidrel, na.rm = TRUE), 2)),  # Umidità
+    maxUmidit = ifelse(all(is.na(Medio_umidrel)), NA_real_, round(max(Medio_umidrel, na.rm = TRUE), 2)),  
+    minUmidit = ifelse(all(is.na(Medio_umidrel)), NA_real_, round(min(Medio_umidrel, na.rm = TRUE), 2)), 
+    Prec = ifelse(all(is.na(Medio_prec)), NA_real_, sum(Medio_prec, na.rm = TRUE)),  # Precipitazioni
+    maxPrec = max(Medio_prec, na.rm = TRUE),
+    VelVentoMedia = ifelse(all(is.na(Medio_velvento)), NA_real_, round(mean(Medio_velvento, na.rm = TRUE), 2)),  # Velocità media
+    VelVentoMax = ifelse(all(is.na(Medio_velvento)), NA_real_, max(Medio_velvento, na.rm = TRUE)),  # Velocità massima
+    u_media = ifelse(all(is.na(u)), NA_real_, mean(u, na.rm = TRUE)),  # Componente u
+    v_media = ifelse(all(is.na(v)), NA_real_, mean(v, na.rm = TRUE)),  # Componente v
+    DirezioneMedia = ifelse(all(is.na(u)) | all(is.na(v)), NA_real_, atan2(u_media, v_media) * 180 / pi)  # Direzione
+  ) %>%
+  ungroup() 
+```
+
+
+```{r}
+plot_columns <- function(data) {
+  # Escludi le colonne 'DatetimeBegin' e 'NomeStazione'
+  columns_to_plot <- colnames(data) %>% setdiff(c("DatetimeBegin", "NomeStazione"))
+  
+  # Ciclo sulle colonne da plottare
+  plots <- lapply(columns_to_plot, function(col) {
+    ggplot(data, aes(x = DatetimeBegin, y = .data[[col]], color = NomeStazione)) +
+      geom_line() +
+      labs(
+        title = paste("Trend di", col),
+        x = "Data",
+        y = col
+      ) +
+      theme_minimal()
+  })
+  
+  return(plots)
+}
+
+# Esempio di utilizzo
+plots <- plot_columns(df_stazioni_meteo)
+
+plots
+
+
+```
+
+
+
+```{r}
+generate_correlation_matrices <- function(data) {
+  # Escludi le colonne 'DatetimeBegin' e 'NomeStazione'
+  columns_to_analyze <- colnames(data) %>% setdiff(c("DatetimeBegin", "NomeStazione"))
+  
+  # Lista per memorizzare le matrici di correlazione
+  correlation_results <- list()
+  
+  # Ciclo su ogni variabile
+  for (col in columns_to_analyze) {
+    # Riorganizza i dati per creare una matrice
+    wide_data <- data %>%
+      dplyr::select(NomeStazione, DatetimeBegin, !!sym(col)) %>%
+      pivot_wider(names_from = NomeStazione, values_from = !!sym(col))
+    
+    # Calcola la matrice di correlazione
+    corr_matrix <- cor(wide_data %>% dplyr::select(-DatetimeBegin), use = "pairwise.complete.obs")
+    
+    # Salva la matrice nella lista
+    correlation_results[[col]] <- corr_matrix
+    
+    # Stampa la matrice di correlazione
+    cat("\nMatrice di correlazione per:", col, "\n")
+    print(corr_matrix)
+  }
+  
+  return(correlation_results)
+}
+correlation_matrices <- generate_correlation_matrices(df_stazioni_meteo)
+```
+
+
+```{r}
+correlation_matrices$DirezioneMedia
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+```{r}
+df_giornaliero <- df_meteo %>%
+  mutate(
+    DatetimeBegin = as.Date(DataOra),
+    # Calcolo delle componenti u e v
+    u = -Medio_velvento * sin(Medio_dirvento * pi / 180),  # Conversione in radianti
+    v = -Medio_velvento * cos(Medio_dirvento * pi / 180)
+  ) %>%
+  group_by(DatetimeBegin) %>%
+  summarize(
+    Temp = round(mean(Medio_temp, na.rm = TRUE), 2),  # Media della temperatura
+    Rad = sum(Medio_radglob, na.rm = TRUE),  # Somma radiazione
+    maxRad= ifelse(all(is.na(Medio_radglob)), NA_real_, max(Medio_radglob, na.rm = TRUE)),
+    Umidit = round(mean(Medio_umidrel, na.rm = TRUE), 2),  # Media umidità relativa
+    maxUmidit = ifelse(all(is.na(Medio_umidrel)), NA_real_, round(max(Medio_umidrel, na.rm = TRUE), 2)),  
+    minUmidit = ifelse(all(is.na(Medio_umidrel)), NA_real_, round(min(Medio_umidrel, na.rm = TRUE), 2)), 
+    Prec = sum(Medio_prec, na.rm = TRUE),  # Somma precipitazioni
+    maxPrec = max(Medio_prec, na.rm = TRUE),
+    VelVentoMedia = round(mean(Medio_velvento, na.rm = TRUE), 2),  # Media velocità
+    VelVentoMax = max(Medio_velvento, na.rm = TRUE),  # Velocità massima
+    u_media = mean(u, na.rm = TRUE),  # Media della componente u
+    v_media = mean(v, na.rm = TRUE),  # Media della componente v
+    DirezioneMedia = atan2(u_media, v_media) * 180 / pi  # Direzione media in gradi
+  ) %>%
+  ungroup()  # Rimuove il grouping
+```
+
+La media giornaliera di queste componenti (u_media e v_media) descrive la tendenza generale del vento in quelle direzioni.Un valore positivo indica che il vento, mediamente, soffia verso est.
+Un valore negativo indica che il vento soffia verso ovest.
+v_media.
+Un valore positivo indica che il vento, mediamente, soffia verso nord.
+Un valore negativo indica che il vento soffia verso sud.
+
+la funzione atan2 viene usata per calcolare angolo di un vettore bidimensionale.
+
+
+
+```{r}
+ts_temp <- df_giornaliero %>%
+  filter(!is.na(Prec)) %>%  # Rimuove valori mancanti
+  arrange(DatetimeBegin) %>%           # Ordina i dati temporalmente
+  pull(Prec) %>%           # Estrae la colonna Medio_prec come vettore numerico
+  ts(frequency = 7, start = c(2022, 1))  # freq settimanale osservazioni per anno)
+
+# Decomposizione STL
+decomp <- stl(ts_temp, s.window = "periodic")
+
+# Visualizza la decomposizione
+
+autoplot(decomp) +
+  labs(
+    title = "Decomposizione STL della Precipitazione Giornaliera",
+    x = "Anno",
+    y = "Precipitazione (mm)"
+  )
+```
+
+The figure show a clear seasonality in the temperature patterns, with high temperatures in summer and low temperatures in winter. The STL decomposition reveals several peaks, indicating unusual weather events. According to a report by ARPA Lombardia, the Year 2022 was the warmest ever recorded since the beginning of temperature monitoring, with records over Milan dating back to 1763. This year was also characterised by a significant rainfall deficit.
+
+Global radiation shows a similar trend to tenperature. In contrast  relative humidity remains consistently high for most of the year, without showing a defined trend. This phenomenon is amplified by the geographic characteristics of the Po Valley, that is prone to air stagnation. During the summer, relatively high humidity levels are observed  when temperatures exceed 30°C, further intensifying the perception of heat.Precipitation, on the other hand, remains generally low and does not display significant trends. Rainfall is concentrated primarily in spring and autumn, although thunderstorms are quite common during hot and humid summers. Therefore, the climate of the Po Valley can be described as humid temperate subcontinental.
+
+
+
+
+In contrast, relative humidity is present throughout most of the year. Conversely, relative humidity remains consistently high for most of the year. This phenomena is amplified by the geographical characteristics of the Po Valley, a region prone to air stagnation. During the winter months, particularly from November to February, dense fog often occurs, increasing humidity. Furthermore, during the summer, when temperatures exceed 30°C, relatively high humidity levels are observed, further intensifying the perception of heat. Precipitation, on the other hand, generally remains low and does not show significant trends. Precipitation is mainly concentrated in spring and autumn, although thunderstorms are quite common during hot and humid summers. Therefore, the climate of the Po Valley can be described as humid subcontinental temperate.
+
+
+```{r}
+acf(df_meteo$Medio_prec, na.action = na.pass, main = "Autocorrelazione precipitazione cumulata")
+```
+```{r}
+pacf(df_meteo$Medio_prec, na.action = na.pass, main = "PACF dellumidita precipitazione cumulata")
+```
+
+```{r}
+residui_temp <- decomp$time.series[, "remainder"]
+
+# Calcola la soglia per identificare gli spike (es. ±2 deviazioni standard)
+soglia_sup <- mean(residui_temp) + 2 * sd(residui_temp)
+soglia_inf <- mean(residui_temp) - 2 * sd(residui_temp)
+
+# Identifica gli spike nei residui
+spike <- which(residui_temp > soglia_sup | residui_temp < soglia_inf)
+
+# Crea un dataframe con gli spike
+date_spike <- df_giornaliero[spike, ]
+```
+
+```{r}
+date_spike
+```
+
+
+
+
+
+```{r}
+ plot1= ggplot(df_giornaliero, aes(x = DataGiorno, y = Temp )) +
+  geom_line(color = "red", size = 0.7, alpha = 0.8) +
+ geom_smooth(method = "loess", color = "red", size = 0.8) + 
+  labs(
+       y = "temp[°C]",
+       color = "Variabile") +
+ theme_minimal() +
+  theme(axis.text.x = element_text(angle = 0, hjust = 1), axis.title.x = element_blank()) 
+
+ plot2= ggplot(df_giornaliero, aes(x = DataGiorno, y = Rad)) +
+  geom_line(color = "blue", size = 0.7, alpha = 0.8) +
+ geom_smooth(method = "loess", color = "blue",  size = 0.8) +
+  labs(
+        x = "Date",
+       y = "GlRad [W/m2]",
+       color = "Variabile") +
+ theme_minimal() +
+  theme(axis.text.x = element_text(angle = 0, hjust = 1),axis.title.x = element_blank()) 
+  plot3= ggplot(df_giornaliero, aes(x = DataGiorno, y = Umidit )) +
+  geom_line(color = "orange",size = 0.7, alpha = 0.8) +
+  geom_smooth(method = "loess", color = "orange", size = 0.8) + 
+  labs(
+       y = "rlUmd [%]",
+       color = "Variabile") +
+ theme_minimal() +
+  theme(axis.text.x = element_text(angle = 0, hjust = 1),axis.title.x = element_blank()) 
+   plot4= ggplot(df_giornaliero, aes(x = DataGiorno, y = Prec )) +
+  geom_line(color = "purple",size = 0.7, alpha = 0.8) +
+  geom_smooth(method = "loess", color = "purple", size = 0.8) + 
+  labs(
+       x = "Date",
+       y = "precip [mm/day]",
+       color = "Variabile") +
+ theme_minimal() +
+  theme(axis.text.x = element_text(angle = 0, hjust = 1),) 
+
+```
+
+
+
+
+```{r}
+final_plot1 <- plot1 /  plot2 
+final_plot1
+```
+
+```{r}
+final_plot2 <- plot3 /  plot4
+final_plot2
+```
+
+```{r}
+df_meteo %>% dplyr::filter(Medio_prec > 40)
+```
+
+
+
+
+
+
+
+
+
+
+
+
+```{r}
+ggplot(variabili_long, aes(sample = Valore)) +
+  stat_qq() +
+  stat_qq_line(color = "red") +
+  facet_wrap(~ Variabile, scales = "free") + # Un pannello per ogni variabile
+  labs(title = "Q-Q Plot delle Variabili", x = "Quantili Teorici", y = "Quantili Campionari") +
+  theme_minimal()
+```
+
+
+## gestion nan (meteo)
+
+
+```{r}
+cor_test <- cor.test(df_meteo$Medio_temp, df_meteo$Medio_radglob, method = "pearson")
+print(cor_test)
+```
+
+
+```{r}
+# coefficiente di correlazione di Pearson, misurando solo la relazione lineare
+cor_matrix <- df_meteo %>%
+  select(starts_with("Medio_")) %>%
+  cor(use = "complete.obs")
+print(cor_matrix)
+```
+
+```{r}
+df_meteo %>%
+  select(starts_with("Medio_")) %>% 
+  cor( method = "spearman", use = "complete.obs")
+```
+
+
+```{r}
+cor_data <- melt(cor_matrix)
+ggplot(cor_data, aes(x = Var1, y = Var2, fill = value)) +
+  geom_tile(color = "white") + # Disegna le celle della heatmap
+  geom_text(aes(label = round(value, 2)), color = "black", size = 4) + 
+  scale_fill_gradient(low = "#CCCCFF", high = "#2A52BE") + # Colori
+  theme_minimal() + # Tema elegante e pulito
+  labs(x = "Variables", y = "Variables", fill = "Correlation") + # Etichette
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) # Ruo
+```
+
+
+
+
+```{r}
+df_meteo <- df_meteo %>%
+  st_as_sf(coords = c("lng", "lat"), crs = 4326)
+```
+
+
+
+```{r}
+ggplot_na_distribution(df_meteo$Medio_temp)
+
+
+```
+
+
+
+
+
+
+```{r}
+cor(df_meteo %>% select(starts_with("Medio_"), -DataOra), use = "complete.obs")
+```
+
+
+
+
+
+```{r}
+df_meteo <- df_meteo %>%
+  mutate(
+    day = floor_date(DataOra, unit = "day"),
+    month = format(DataOra, "%Y-%m")  # Anno-Mese
+  )
+```
+
+
+
+
+```{r}
+# Serie oraria
+ggplot(df_meteo, aes(x = DataOra, y = Medio_temp, color = NomeStazione)) +
+  geom_line() +
+  labs(title = "Temperatura oraria", x = "Tempo", y = "Temperatura (°C)") +
+  theme_minimal()
+
+```
+
+
+### rosa-venti plot
+
+```{r}
+rosa_venti <- df_meteo %>% select("DataOra","Medio_velvento","Medio_dirvento"  )
+int_inverno <- list(
+  interval(ymd("2021-12-21"), ymd("2022-03-19")),
+  interval(ymd("2022-12-21"), ymd("2023-03-19")),
+  interval(ymd("2023-12-21"), ymd("2024-01-31"))
+)
+
+int_estate <- list(
+  interval(ymd("2022-06-21"), ymd("2022-09-22")),
+  interval(ymd("2023-06-21"), ymd("2023-09-22"))
+)
+
+int_primavera <- list(
+  interval(ymd("2022-03-20"), ymd("2022-06-20")),
+  interval(ymd("2023-03-20"), ymd("2023-06-20"))
+)
+
+int_autunno <- list(
+  interval(ymd("2022-09-23"), ymd("2022-12-20")),
+  interval(ymd("2023-09-23"), ymd("2023-12-20"))
+)
+
+
+rosa_venti <- rosa_venti %>% 
+  mutate(Data = format(as.POSIXct(DataOra), "%Y-%m-%d")) %>%  # Usa DataOra invece di datetime
+  mutate(stagione = case_when(
+    ymd(Data) %within% int_inverno ~ "Winter",
+    ymd(Data) %within% int_estate ~ "Summer",
+    ymd(Data) %within% int_primavera ~ "Spring",
+    ymd(Data) %within% int_autunno ~ "Autumn",
+    TRUE ~ NA_character_  # Assegna NA se non rientra in nessun intervallo
+  )) %>% select(Data, Medio_dirvento, Medio_velvento,stagione)
+```
+
+```{r}
+primavera <- rosa_venti %>% drop_na() %>%  filter( stagione == "Spring") %>% select(Data, Medio_dirvento, Medio_velvento)
+estate <- rosa_venti %>% drop_na() %>%filter( stagione == "Summer")  %>% select(Data, Medio_dirvento, Medio_velvento)
+autunno <- rosa_venti %>% drop_na() %>% filter( stagione == "Autumn")  %>% select(Data, Medio_dirvento, Medio_velvento)
+inverno <- rosa_venti %>% drop_na() %>% filter( stagione == "Winter")  %>% select(Data, Medio_dirvento, Medio_velvento)
+```
+
+
+
+
+
+```{r}
+install.packages("climatol")
+```
+
+
+```{r}
+library("climatol")
+```
+
+```{r}
+primavera <- windrose(primavera,   uni='m/s', ndir=16, spdcut=NULL,
+maxnsc=8, fnum=4, fint=5, flab=2, ang=-3*pi/16, margin=c(0,0,4,0),
+pal=c('cyan','yellow','orange','red','brown'))
+
+
+estate <- windrose(estate ,   uni='m/s', ndir=16, spdcut=NULL,
+maxnsc=8, fnum=4, fint=5, flab=2, ang=-3*pi/16, margin=c(0,0,4,0),
+pal=c('cyan','yellow','orange','red','brown'))
+
+autunno <- windrose(autunno,   uni='m/s', ndir=16, spdcut=NULL,
+maxnsc=8, fnum=4, fint=5, flab=2, ang=-3*pi/16, margin=c(0,0,4,0),
+pal=c('cyan','yellow','orange','red','brown'))
+
+inverno<- windrose(inverno,   uni='m/s', ndir=16, spdcut=NULL,
+maxnsc=8, fnum=4, fint=5, flab=2, ang=-3*pi/16, margin=c(0,0,4,0),
+pal=c('cyan','yellow','orange','red','brown'))
+
+
+
+```
+
+
+### plot parte descrittiva dataset
+
+
+Il Kriging è una tecnica di interpolazione per stimare valori in aree non misurate basandosi su dati campionati. Esamina le dipendenze spaziali utilizzando un semivariogramma, che rappresenta la variabilità spaziale in funzione della distanza tra i punti. I modelli comunemente testati includono:
+
+Modello gaussiano: descrive relazioni spaziali molto lisce.
+Modello esponenziale: cattura cambiamenti più rapidi con la distanza.
+
+Per analizzare le dipendenze spaziali dei dati di PM10, è possibile:
+
+Calcolare un semivariogramma empirico.
+Adattare un modello teorico al semivariogramma per valutare la portata (range) e il nugget.
+
+kringign classico (assume media costante e che La variabile di interesse sia una realizzazione di un processo stocastico stazionario).
+
+kringing generalizzato (Il Kriging generalizzato estende il Kriging classico assumendo che la media non sia costante ma variabile nello spazio, rappresentata da un modello lineare).Combina un modello deterministico  e un componente stocastico.
+
+
+## kringign classico
+
+```{r}
+air_sensor <- air_sensor %>%
+  dplyr::rename(Longitude = lon,
+         Latitude = lat,
+         AirQualityStationName = sensor_id) %>%
+  mutate(AirQualityStationName = as.character(AirQualityStationName))  %>%
+dplyr::select(- location)
+```
+
+```{r}
+df <- read_delim(
+  "C:/Users/samir/Downloads/dati_tesi/pm10_milano_EU.csv",
+  delim = ",", 
+  show_col_types = FALSE
+)  %>% mutate(DatetimeBegin = as.Date(DatetimeBegin)) %>%    dplyr::select(AirQualityStationName, DatetimeBegin, Longitude, Latitude, PM10) %>% bind_rows(air_sensor)
+```
+
+
+
+
+
+
+
+```{r}
+statistiche <- df %>%
+  group_by(AirQualityStationName) %>%
+  summarize(
+    mean_PM10 = mean(PM10, na.rm = TRUE),
+    median_PM10 = median(PM10, na.rm = TRUE),
+    sd= sd(PM10, na.rm = TRUE),
+    min_PM10 = min(PM10, na.rm = TRUE),
+    max_PM10 = max(PM10, na.rm = TRUE)
+  )
+```
+
+```{r}
+outlier_analysis <- df %>%
+  group_by(AirQualityStationName) %>%
+  mutate(
+    Q1 = quantile(PM10, 0.25, na.rm = TRUE),
+    Q3 = quantile(PM10, 0.75, na.rm = TRUE),
+    IQR = Q3 - Q1,
+    lower_bound = Q1 - 1.5 * IQR,
+    upper_bound = Q3 + 1.5 * IQR,
+     is_outlier = PM10 < lower_bound | PM10 > upper_bound) %>%
+  filter(is_outlier) 
+
+print(outlier_analysis)
+
+```
+
+
+
+
+
+```{r}
+ggplot(df, aes(x = AirQualityStationName, y = PM10)) +
+  geom_boxplot(outlier.color = "red", outlier.shape = 16) +
+  labs() +
+ theme(
+    axis.text.x = element_text(angle = 0, hjust = 0.5, size = 8, lineheight = 1.2)
+  ) +
+  scale_x_discrete(labels = function(x) str_wrap(x, width = 9))
+```
+```{r}
+ggplot(outlier_analysis, aes(x = DatetimeBegin)) +
+  geom_bar(fill = "steelblue", color = "black", width = 0.8) +
+  labs(
+    
+    x = "Date",
+    y = "Number of Outliers"
+  ) +
+  theme_minimal()
+```
+
+```{r}
+outlier_analysis %>%   dplyr::filter(.data$is_outlier == TRUE) %>% group_by(.data$DatetimeBegin) %>%
+  summarise(count= n()) %>% arrange(desc(count))
+```
+
+ si concentrano in inverno e potrebbero riflettere dinamiche stagionali legate alle condizioni meteorologiche (es. inversioni termiche, aumento del riscaldamento domestico) e geografiche (es. effetto "conca" della Pianura Padana). Questi valori rappresentano quindi informazioni importanti per l'analisi delle polveri sottili (PM10).
+
+
+
+```{r}
+library(ggplot2)
+```
+
+
+
+```{r}
+ts_temp <- df %>%
+  # Rimuove valori mancanti
+  arrange(DatetimeBegin) %>%           # Ordina i dati temporalmente
+  pull(PM10) %>%           # Estrae la colonna Medio_prec come vettore numerico
+  ts(frequency = 12, start = c(2022, 1))  # freq settimanale osservazioni per anno)
+
+# Decomposizione STL
+decomp <- stl(ts_temp, s.window = "periodic")
+
+# Visualizza la decomposizione
+
+autoplot(decomp) +
+  labs(
+    title = "Decomposizione STL ",
+    x = "Anno",
+    y = "pm10"
+  )
+```
+
+```{r}
+df %>%
+  mutate(Weekday = weekdays(DatetimeBegin),
+         Month = format(DatetimeBegin, "%b")) %>%
+  group_by(Month, Weekday) %>%
+  summarise(mean_PM10 = mean(PM10, na.rm = TRUE)) %>%
+  geom_tile() +
+  scale_fill_gradient(low = "#86ebc9",
+                    high = "#09855c",
+                    guide = "colorbar") +  # Gradiente da blu a rosso
+  theme_minimal() +
+  labs(title = "Heatmap dei valori medi di PM10",
+       x = "Mese",
+       y = "Giorno della settimana",
+       fill = "PM10 (media)")
+```
+
+
+
+
+
+```{r}
+valori_50 <- df %>% select(.data$AirQualityStationName, .data$DatetimeBegin, .data$PM10) %>%
+  dplyr::filter(.data$PM10 > 50)
+```
+
+```{r}
+df_wide <- df %>% dplyr::select(AirQualityStationName,DatetimeBegin, PM10) %>%
+     pivot_wider(
+    names_from = AirQualityStationName,
+    values_from = PM10)
+```
+
+
+
+
+```{r}
+df_longs <- df_wide %>%
+  pivot_longer(
+    cols = -DatetimeBegin,  # Tutte le colonne tranne DatetimeBegin
+    names_to = "Station",   # Nome della colonna per le stazioni
+    values_to = "PM10"      # Nome della colonna per i valori di PM10
+  )
+missing_dates <- df_longs %>%
+  filter(is.na(PM10)) %>%   
+  rename(AirQualityStationName =Station) %>% # Filtra le righe con PM10 NA
+  group_by(AirQualityStationName) %>%                 # Raggruppa per stazione
+  summarise(missing_dates = paste0(DatetimeBegin, collapse = ", ")) %>% # Concatena le date
+  ungroup() 
+```
+
+
+
+
+
+
+
+```{r}
+list_days <- seq(ymd("2022-01-01"), ymd("2023-12-31"), by = "day")
+gap_df <- data.frame(Date = list_days)
+
+# Per ogni stazione, aggiungiamo una colonna indicante i gaps
+for (station in unique(missing_dates$AirQualityStationName)) {
+  # Estrazione delle date mancanti per la stazione
+  missing_dates_station <- strsplit(
+    missing_dates$missing_dates[missing_dates$AirQualityStationName == station],
+    ", "
+  )[[1]] %>%
+    as.Date()
+  
+  # Creazione di una colonna binaria: 1 se la data è mancante, 0 altrimenti
+  gap_df[[station]] <- ifelse(gap_df$Date %in% missing_dates_station, 1, 0)
+}
+
+```
+
+
+
+
+
+
+
+
+
+```{r}
+# Loop per ogni stazione
+for (station in list_stazioni) {
+  # Crea un dataframe filtrato per la stazione corrente
+  station_data <- data.frame(
+    Date = gap_df$Date,
+    Missing = gap_df[[station]]
+  )
+  
+  # Creazione del grafico
+  print(
+    ggplot(station_data, aes(x = Date, y = Missing, fill = as.factor(Missing))) +
+      geom_bar(stat = "identity", color = "black", alpha = 0.8) +
+      labs(
+        title = paste("Station:", station),
+        x = "Date",
+        y = "Missing (=1)"
+      ) +
+   theme_minimal() +
+      theme(
+        plot.title = element_text(size = 16, face = "bold"),  # Titolo più grande e in grassetto
+        axis.title.x = element_text(size = 14),              # Asse X più grande
+        axis.title.y = element_text(size = 14),              # Asse Y più grande
+        axis.text.x = element_text(size = 12, angle = 0, hjust = 1),  # Testo delle etichette asse X
+        axis.text.y = element_text(size = 12),              # Testo delle etichette asse Y
+        legend.position = "none"
+      ) +
+      scale_fill_manual(values = c("0" = "skyblue", "1" = "tomato"))
+  )
+}
+```
+
+
+```{r}
+library("imputeTS")
+```
+
+
+```{r}
+for (station in list_stazioni) {
+  # Filter the dataframe for the current station
+  df0 <- df_wide %>%
+      dplyr::select(DatetimeBegin, all_of(station)) %>%
+      arrange(DatetimeBegin)
+  
+  # Compute and display missing data statistics for PM10
+  stats <- imputeTS::statsNA(df0[[station]])
+  cat("\nMissing data statistics for station:", station, "\n")
+  print(stats)
+}
+```
+
+
+
+
+
+
+
+
+
+
+
+```{r}
+ggplot(df, aes(sample = PM10_log)) +
+  stat_qq() +
+  stat_qq_line() +
+  facet_wrap(~ AirQualityStationName) +
+  labs(title = "QQ-Plot per Stazione", x = "Quantili Teorici", y = "Quantili Osservati") +
+  theme_minimal()
+```
+
+```{r}
+library(MASS)
+```
+la trasformazione logaritmica non riesce a normalizzare i dati, proviamo in questo modo BOx-COX per ridurre la skewness e avvicnare la distribuzione alla normalità. troviamo lambda che massimizza la log-verosimiglianza della trasformazione.
+
+
+```{r}
+df_wide %>% dplyr::select(-DatetimeBegin) %>%  vis_miss()
+```
+
+
+```{r}
+dftot <- df_wide %>%  left_join(df_giornaliero, by= c("DatetimeBegin" ) ) 
+```
+
+```{r}
+dftot_corr <- dftot %>% dplyr::select(-DatetimeBegin) %>%  cor(, use = "complete.obs")
+```
+
+i risultati che hai condiviso confermano un'osservazione comune: i sensori low-cost tendono a mostrare una correlazione più elevata con le stazioni di monitoraggio ufficiali (come quelle gestite da ARPA).
+
+Le correlazioni negative con la velocità del vento indicano che, in media, la dispersione degli inquinanti aumenta con il vento.L'umidità relativa è un fattore cruciale che può influenzare le prestazioni dei sensori low-cost, contribuendo a microclimi locali che spesso rendono le misurazioni meno accurate rispetto agli strumenti professionali.
+
+```{r}
+df_longs <- df_wide %>%
+  pivot_longer(
+    cols = -DatetimeBegin,  # Tutte le colonne tranne DatetimeBegin
+    names_to = "Station",   # Nome della colonna per le stazioni
+    values_to = "PM10"      # Nome della colonna per i valori di PM10
+  )
+```
+
+
+
+```{r}
+df_longs %>%
+  mutate(GiornoSettimana = weekdays(as.Date(DatetimeBegin))) %>%
+  group_by(GiornoSettimana, ) %>%
+  summarise(Media_PM10 = mean(PM10, na.rm = TRUE),
+            SD_PM10 = sd(PM10, na.rm = TRUE),
+            Missing = sum(is.na(PM10)))
+```
+
+
+```{r}
+df_longs %>%
+  mutate(Mese = format(as.Date(DatetimeBegin), "%b")) %>%
+  group_by(Mese) %>%
+  summarise(Media_PM10 = mean(PM10, na.rm = TRUE),
+            SD_PM10 = sd(PM10, na.rm = TRUE),
+            Missing = sum(is.na(PM10)))
+```
+
+
+
+```{r}
+install.packages("naniar")
+```
+```{r}
+library(naniar)
+```
+
+
+```{r}
+df_wide <- df %>% dplyr::select(AirQualityStationName,DatetimeBegin, PM10) %>%
+     pivot_wider(
+    names_from = AirQualityStationName,
+    values_from = PM10)
+```
+
+```{r}
+colSums(is.na(df_wide))
+```
+
+
+
+```{r}
+df_marche <- df_wide %>% dplyr::select("DatetimeBegin", "MILANO - V.LE MARCHE")  %>%
+ dplyr::pull() %>%
+  ts(start = c(2022, 1), frequency = 365)
+
+```
+
+
+
+
+
+
+
+### knn
+
+
+
+
+```{r}
+## Filtra solo le correlazioni maggiori di 0.85
+cor_related <- cor_long %>%
+  filter(corr> 0.85 & Var1 != Var2)
+
+```
+
+\[ y= \frac{\sum_{i} r_{i} * y_{i}}{\sum_{i} r_{i}}\]
+Questo codice implementa il metodo di imputazione basato sulla media ponderata delle stazioni correlate
+
+```{r}
+impute_weighted_mean <- function(target_station, cor_related, df) {
+  na_indices <- which(is.na(df[[target_station]])) # Trova valori mancanti
+  
+  for (i in na_indices) {
+    # Filtra i vicini con correlazioni > 0.85
+    neighbors <- cor_related %>%
+      filter(Var1 == target_station) %>%
+      arrange(desc(corr))
+    
+    # Filtra solo i vicini validi che sono colonne in df
+    valid_neighbors <- neighbors %>%
+      filter(Var2 %in% names(df)) %>%
+      pull(Var2)
+    
+    # Estrai i valori osservati nella riga i
+    observed_values <- df[i, valid_neighbors, drop = FALSE] %>%
+      unlist()
+    
+    # Ottieni i pesi delle correlazioni
+    weights <- neighbors %>%
+      filter(Var2 %in% valid_neighbors) %>%
+      pull(corr)
+    
+    # Calcolo della media ponderata
+    weighted_sum <- sum(weights * observed_values, na.rm = TRUE)
+    weight_total <- sum(weights[!is.na(observed_values)])
+    
+    # Sostituzione del valore mancante
+    if (weight_total > 0) {
+      df[[target_station]][i] <- weighted_sum / weight_total
+    } else {
+      df[[target_station]][i] <- NA # Nessun valore valido
+    }
+    
+    # Debugging
+  #  cat("Riga:", i, "\n")
+  #  cat("Valori osservati:", observed_values, "\n")
+  #  cat("Pesi:", weights, "\n")
+  #  cat("Valore imputato:", df[[target_station]][i], "\n\n")
+  }
+  
+  return(df) # Restituisci il dataframe aggiornato
+}
+
+## Ciclo su tutte le stazioni
+for (station in unique(cor_related$Var1)) {
+  df_wide <- impute_weighted_mean(station, cor_related, df_wide)
+}
+```
+
+
+
+
+
+```{r}
+df_longs <- df_wide %>%
+  pivot_longer(
+    cols = -DatetimeBegin,  # Tutte le colonne tranne DatetimeBegin
+    names_to = "Station",   # Nome della colonna per le stazioni
+    values_to = "PM10"      # Nome della colonna per i valori di PM10
+  )
+
+ggplot(df_longs, aes(x = DatetimeBegin, y = PM10, color = Station)) +
+  geom_line() +
+  labs(
+    title = "Serie Temporali con Valori Imputati per Tutte le Stazioni",
+    x = "Tempo",
+    y = "PM10"
+  ) +
+  theme_minimal() +
+  theme(legend.position = "bottom")
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+```{r}
+df_wide <- df %>% select(AirQualityStationName,DatetimeBegin, PM10) %>%
+     pivot_wider(
+    names_from = AirQualityStationName,
+    values_from = PM10)
+```
+
+
+
+
+
+
+
+```{r}
+#df_wide <- df %>% select(AirQualityStationName,DatetimeBegin, PM10) %>%
+#     pivot_wider(
+#    names_from = AirQualityStationName,
+#    values_from = PM10)
+
+correlation_matrix <- df_wide %>%
+  dplyr::select(-DatetimeBegin) %>%  # Escludere la colonna Date se presente
+  cor(use = "pairwise.complete.obs")
+
+correlation_matrix1 <-  correlation_matrix
+nomi_corr <- c( "St.Marche"  , "St.Verziere","St.Senato","St.CittaStudi", "22851" , "24644","32399" ,  "40256"  , "44216"      , "50128"  , "70169"  )
+
+rownames(correlation_matrix1) <- nomi_corr
+colnames(correlation_matrix1) <- nomi_corr
+```
+
+```{r}
+#png("C:/Users/samir/Downloads/corr_plot_stazioni.png", width = 1400, height = 1400, res = 300)
+colmat <- colorRampPalette(c("red", "white", "blue"))
+corrplot(correlation_matrix1, col = colmat(200), order = 'hclust',number.cex = 0.8, tl.cex = 0.8,is.corr=FALSE)
+
+```
+
+
+
+
+```{r}
+library(reshape2)
+```
+
+
+```{r}
+cor_long <- melt(correlation_matrix) 
+colnames(cor_long) <- c("Var1", "Var2", "corr")# Matrice di correlazione
+dist_long <- melt(as.matrix(distance_df))  
+colnames(dist_long) <- c("Var1", "Var2", "Distance")# Matrice di distanza
+
+
+```
+
+
+```{r}
+dist_corr_df <- merge(dist_long, cor_long, by = c("Var1", "Var2")) %>%
+  dplyr::filter(.data$Distance >0 & .data$corr < 1  )
+```
+
+
+
+```{r}
+summary(dist_corr_df)
+```
+
+```{r}
+col <- as.character(dist_corr_df$Var1) %>% unique()
+sensori <- c("22851", "24644","32399","40256","44216","50128","70169")
+arpa <- c("MILANO - SENATO","MILANO - VERZIERE","MILANO - V.LE MARCHE", "MILANO PASCAL CITT� STUDI")
+dist_corr_df <- dist_corr_df %>% 
+
+ mutate(
+    category = case_when(
+      Var1 %in% arpa & Var2 %in% arpa ~ "only ARPA",
+      Var1 %in% sensori & Var2 %in% sensori ~ "only low_cost sensors",
+      (Var1 %in% arpa & Var2 %in% sensori) |
+      (Var1 %in% sensori & Var2 %in% arpa) ~ "Mix",
+      TRUE ~ "Unknown"  # For cases where no category applies
+    )
+  )
+```
+
+
+
+```{r}
+ggplot(dist_corr_df, aes(x = Distance, y = corr, color= category)) +
+  geom_point(alpha = 0.6) +
+  geom_smooth(method = "loess", col = "blue", se = TRUE) +  # LOESS per relazioni non lineari
+  labs(#title = "Relazione non lineare tra Distanza e Correlazione",
+       x = "Distance (m)",
+       y = "Correlation") +
+  theme_bw()
+ggsave("C:/Users/samir/Downloads/dist_plot_stazioni.png", width = 7.5, height = 5, dpi = 1000)
+```
+
+
+
+
+
+
+
+
+
+```{r}
+dist_corr_model <- lm(corr ~ Distance, data = dist_corr_df)
+summary(dist_corr_model)
+```
+
+```{r}
+coordinates(dist_corr_df) <- ~Distance + corr
+
+# Calcolo del variogramma
+variogram_model <- variogram(corr ~ Distance, data = dist_corr_df)
+plot(variogram_model)
+```
+
+
+
+## Temporal characteristics
+
+
+
+```{r}
+library(xts)
+```
+
+```{r}
+list_stazioni <- c( "MILANO - V.LE MARCHE"  , "MILANO - VERZIERE","MILANO - SENATO","MILANO PASCAL CITT� STUDI", "22851" , "24644","32399" ,  "40256"  , "44216"      , "50128"  , "70169"  )
+xts_list <- lapply(list_stazioni, function(stazione) {
+  df %>%
+    filter(AirQualityStationName == stazione) %>%
+    arrange(DatetimeBegin) %>%
+    dplyr::select(DatetimeBegin, PM10) %>%
+    { xts(.$PM10, order.by = as.Date(.$DatetimeBegin, format = "%Y-%m-%d")) }
+})
+
+# Assegna i nomi alle liste per identificare le stazioni
+names(xts_list) <- list_stazioni
+```
+
+```{r}
+
+par(mfrow = c(2, 2))
+
+# Loop per calcolare e tracciare l'ACF per ogni stazione
+for (i in names(xts_list)) {
+  acf(xts_list[[i]], lag.max = 30, main = paste("ACF - Stazione:", i))
+}
+```
+
+```{r}
+par(mfrow = c(2, 2))
+
+# Loop per calcolare e tracciare l'ACF per ogni stazione
+for (i in names(xts_list)) {
+  pacf(xts_list[[i]], lag.max = 30, main = paste("PACF - Stazione:", i))
+}
+```
+
+
+
+
+
+
+
+```{r}
+df %>%
+  filter(AirQualityStationName == "22851") %>% select("DatetimeBegin", "PM10")
+  arrange(DatetimeBegin) %>% # Assicura che le date siano ordinate
+   # Rimuove la colonna stazione se non necessaria
+  xts(order.by = as.Date(DatetimeBegin, format = "%Y-%m-%d"))
+```
+
+
+
+
+
+
+
+
+
+## dopo
+vi sono 75 giorni con piu di 3 stazioni/sensori che rilevano una concentrazione locale nell'aria di piu di 50. con il mese di gennaio 2022 il piu critico.
+
+```{r}
+gennaio_2022 <- df %>% dplyr::filter(.data$DatetimeBegin >= "2022-01-01" & .data$DatetimeBegin <= "2022-01-31") 
+```
+
+```{r}
+ggplot( gennaio_2022, aes(x = DatetimeBegin, y = PM10, color = AirQualityStationName)) +
+  geom_line() +
+  geom_hline(aes(yintercept = 50, linetype = "Daily EU limits"), color = "orange", size = 1.3) +
+   scale_linetype_manual(values = c(
+    "Daily EU limits" = "dashed"
+  )) +
+  labs(
+       x = "Data",
+       y = "PM10 (µg/m³)") +
+  theme_minimal()
+```
+
+
+
+
+
+```{r}
+ df <- st_as_sf(pm10_milano, coords = c("Longitude", "Latitude"), crs = 4326)
+# Trasforma le coordinate in UTM Zone 32N (EPSG:32632)
+df<- st_transform(df, crs = 32632)
+```
+
+
+
+
+```{r}
+
+ggplot( df, aes(x = DatetimeBegin, y = PM10, color = AirQualityStationEoICode)) +
+  geom_line() +
+  
+  labs(title = "Concentrazione Giornaliera di PM10 per Stazione",
+       x = "Data",
+       y = "PM10 (µg/m³)") +
+  theme_minimal()
+
+
+
+```
+Osserviamo sicuramente una tendeza  temporale con picchi in inverno e riduzioni nei mesi estivi. Le curve delle diverse stazioni sembrano seguire lo stesso pattern, suggerendo che i fattori che influenzano il PM10 siano comuni (es. condizioni meteorologiche, traffico, riscaldamento).
+
+
+
+
+
+```{r}
+ggplot(df, aes(x = AirQualityStationEoICode, y = PM10)) +
+  geom_boxplot() +
+  labs(title = "Daily distribution of PM10 per air monitorin station",
+       x = "Stazione",
+       y = "PM10 (µg/m³)") +
+  theme_minimal()
+```
+Le distribuzioni del PM10 giornaliero per le quattro stazioni non sembrano discostarsi molto in termini di mediana, range interquartile e presenza di outlier. ci sono valori estremi che corrispondono ad episodi di inquinamento critico che andranno analizzati.La variabilità intra-stazione è abbastanza alta, come evidenziato dall'ampiezza del range interquartile (IQR), ma è simile tra stazioni.
+
+
+
+
+
+
+```{r}
+df %>% levene_test(PM10 ~ AirQualityStationEoICode)
+```
+
+
+```{r}
+oneway.test(PM10 ~ AirQualityStationEoICode, data = df)
+```
+
+
+```{r}
+qqnorm(df$PM10)
+qqline(df$PM10)
+```
+
+Nelle code (valori bassi e alti), i dati deviano significativamente dalla normalità. Questo suggerisce che i dati contengono valori estremi (outlier) e non sono normalmente distribuiti.
+
+applichiamo trasformazione logaritmica
+```{r}
+df$log_PM10 <- log(df$PM10 + 0.001)
+```
+
+```{r}
+shapiro.test(df$log_PM10)
+```
+```{r}
+qqnorm(df$log_PM10)
+qqline(df$log_PM10)
+```
+
+i dati trasformati soddisfano i presupposti di normalità e omogeneità delle varianze, possiamo ripetere l'ANOVA
+
+
+
+
+
+```{r}
+library(sf)
+```
+
+
+```{r}
+df_wide_st <- df %>% 
+     pivot_wider(
+    names_from = AirQualityStationName,
+    values_from = PM10)
+
+
+
+df_long_st <- df_wide_st %>%
+  pivot_longer(
+    cols = -c(DatetimeBegin, Longitude, Latitude),  # Tutte le colonne tranne DatetimeBegin
+    names_to = "Station",   
+    values_to = "PM10"      
+  ) %>%  dplyr::filter(!is.na(PM10))
+
+df_long_sf <- df_long_st %>%
+  st_as_sf(coords = c("Longitude", "Latitude"), crs = 4326)
+```
+
+
+
+
+
